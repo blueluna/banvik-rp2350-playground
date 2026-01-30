@@ -1,0 +1,8 @@
+[package]
+edition = "2024"
+name = "rp2350-playground"
+version = "0.1.0"
+authors = ["Erik Bånvik <erik.public@gmail.com>"]
+resolver = "3"
+
+[dependencies]
