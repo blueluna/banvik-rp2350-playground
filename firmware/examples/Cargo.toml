@@ -16,6 +16,7 @@ defmt-rtt = "1.1"
 
 efmt = { git = "https://github.com/dragonnn/efmt.git", branch = "main" , features = ["heapless09"] }
 
+embedded-alloc = "0.7"
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = "0.3.0"
@@ -31,7 +32,12 @@ embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"]
 
 heapless = { version = "0.9" }
 
+nanomp3 = { git = "https://github.com/wavey-ai/nanomp3.git", branch = "master" }
+
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 
 smart-leds = "0.4.0"
 static_cell = "2.1"
+
+xmrs = { version = "0.9.9", default-features =  false, features = ["import", "libm"] }
+xmrsplayer = { version = "0.9.7", default-features =  false, features = ["libm"] }

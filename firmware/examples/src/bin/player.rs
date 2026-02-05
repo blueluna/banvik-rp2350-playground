@@ -1,18 +1,34 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use core::mem;
 use defmt::unwrap;
+use embedded_alloc::LlffHeap as Heap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Input, Pull};
-use embassy_rp::peripherals::PIO1;
+use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::peripherals::{PIO0, PIO1};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
+use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
 use embassy_rp::pwm::{Pwm, PwmOutput, SetDutyCycle};
-use embassy_time::{Duration, Ticker};
+use embassy_time::{Duration, Ticker, Timer};
 use smart_leds::RGB8;
+use xmrs::module::Module;
+use xmrsplayer;
+
+const MODULE_DATA: &[u8] = include_bytes!("stardstm.mod");
 
 use {defmt_rtt as _, panic_probe as _};
+
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+
+const SAMPLE_RATE: u32 = 11_025;
+const BIT_DEPTH: u32 = 16;
 
 #[unsafe(link_section = ".bi_entries")]
 #[used]
@@ -26,6 +42,7 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
 ];
 
 bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
     PIO1_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO1>;
 });
 
@@ -91,6 +108,60 @@ async fn buttons_task(controls: &'static mut Controls<'static>) -> ! {
     }
 }
 
+
+
+#[embassy_executor::task]
+async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
+
+    const BUFFER_SIZE: usize = 960;
+    static DMA_BUFFER: static_cell::StaticCell<[u32; BUFFER_SIZE * 2]> = static_cell::StaticCell::new();
+    let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
+    let (mut back_buffer, mut front_buffer) = dma_buffer.split_at_mut(BUFFER_SIZE);
+
+    let music_module = if let Ok(m) = Module::load(MODULE_DATA) {
+        defmt::info!("Successfully loaded module: {}", m.name.as_str());
+        m
+    } else {
+        defmt::error!("Failed to load XM module");
+        Module::default()
+    };
+
+    let mut music_player = xmrsplayer::xmrsplayer::XmrsPlayer::new(&music_module, SAMPLE_RATE as f32, 0, false);
+
+    music_player.set_max_loop_count(1);
+
+    i2s.start();
+
+    const MULTIPLIER: f32 = 4095.0;
+    let mut progress = 0;
+
+    loop {
+        // trigger transfer of front buffer data to the pio fifo
+        // but don't await the returned future, yet
+        let dma_future = i2s.write(front_buffer);
+
+        // fill back buffer with fresh audio samples before awaiting the dma future
+        for s in back_buffer.iter_mut() {
+            if let Some((left, right)) = music_player.sample(false) {
+                let ls = (left * MULTIPLIER) as i16;
+                let rs = (right * MULTIPLIER) as i16;
+                *s = (ls as u16 as u32) | ((rs as u16 as u32) << 16);
+            }
+        }
+
+        let table_index = music_player.get_current_table_index();
+        if table_index != progress {
+            progress = table_index;
+            defmt::info!("Index: {}", table_index);
+        }
+
+        // now await the dma future. once the dma finishes, the next buffer needs to be queued
+        // within DMA_DEPTH / SAMPLE_RATE = 8 / 48000 seconds = 166us
+        dma_future.await;
+        mem::swap(&mut back_buffer, &mut front_buffer);
+    }
+}
+
 /// Input a value 0 to 255 to get a color value
 /// The colours are a transition r - g - b - back to r.
 fn wheel(mut wheel_pos: u8) -> RGB8 {
@@ -111,6 +182,39 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = embassy_rp::init(Default::default());
 
     defmt::info!("Entry");
+
+    let psram = {
+        use embassy_rp::qmi_cs1::QmiCs1;
+        let psram_config = embassy_rp::psram::Config::aps6404l();
+        embassy_rp::psram::Psram::new(QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0), psram_config)
+    };
+
+    if let Ok(psram) = psram {
+        defmt::info!("PSRAM initialized successfully, using PSRAM for heap");
+
+        {
+            let (address, size) = unsafe {
+                let address = psram.base_address() as usize;
+                let size = psram.size() as usize;
+                HEAP.init(address, size);
+                (address, size)
+            };
+            defmt::info!("Heap initialized in PSRAM at {:08x}, size: {}", address, size);
+        }
+    } else {
+        defmt::warn!("Failed to initialize PSRAM, using internal RAM for heap");
+
+        const HEAP_SIZE: usize = 65535; // 64 KiB heap size
+        static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
+
+        #[allow(static_mut_refs)]
+        let (address, size) = unsafe {
+            let address = HEAP_MEM.as_ptr() as usize;
+            HEAP.init(address, HEAP_SIZE);
+            (address, HEAP_SIZE)
+        };
+        defmt::info!("Heap initialized at addr: {:08x}, size: {}", address, size);
+    }
 
     let mut pio1 = Pio::new(peripherals.PIO1, Irqs);
 
@@ -148,6 +252,34 @@ async fn main(spawner: Spawner) -> ! {
     );
     let (pwm_4, pwm_3) = pwm_4_3.split();
 
+    let mut audio_shutdown = Output::new(peripherals.PIN_19, Level::Low);
+
+    // Setup pio state machine for i2s output
+    let mut pio0 = Pio::new(peripherals.PIO0, Irqs);
+
+    let bit_clock_pin = peripherals.PIN_21;
+    let left_right_clock_pin = peripherals.PIN_22;
+    let data_pin = peripherals.PIN_20;
+
+    let program = PioI2sOutProgram::new(&mut pio0.common);
+    let i2s = PioI2sOut::new(
+        &mut pio0.common,
+        pio0.sm0,
+        peripherals.DMA_CH0,
+        data_pin,
+        bit_clock_pin,
+        left_right_clock_pin,
+        SAMPLE_RATE,
+        BIT_DEPTH,
+        &program,
+    );
+
+    static I2S: static_cell::StaticCell<PioI2sOut<'static, PIO0, 0>> = static_cell::StaticCell::new();
+
+    Timer::after_millis(10).await;
+    audio_shutdown.set_high();
+
+
     spawner.spawn(unwrap!(buttons_task(CONTROL.init(Controls {
         button_1: Input::new(peripherals.PIN_39, Pull::Up),
         button_2: Input::new(peripherals.PIN_38, Pull::Up),
@@ -158,6 +290,9 @@ async fn main(spawner: Spawner) -> ! {
         led_3: pwm_3.unwrap(),
         led_4: pwm_4.unwrap(),
     }))));
+
+    spawner.spawn(unwrap!(audio_task(I2S.init(i2s))));
+    spawner.spawn(unwrap!(heap_stats_task()));
 
     let mut ticker = Ticker::every(Duration::from_millis(50));
     let mut start_index = 0u8;
@@ -172,5 +307,27 @@ async fn main(spawner: Spawner) -> ! {
         ws2812.write(&data).await;
         ticker.next().await;
         start_index = start_index.wrapping_add(1);
+    }
+}
+
+#[embassy_executor::task]
+async fn heap_stats_task() {
+    let mut ticker = Ticker::every(Duration::from_secs(5));
+    let mut last_used_kib = 0;
+    let mut last_free_kib = 0;
+
+    loop {
+        let used = HEAP.used();
+        let free = HEAP.free();
+        let used_kib = used / 1024;
+        let free_kib = free / 1024;
+        if last_used_kib != used_kib || last_free_kib != free_kib {
+            defmt::info!("Heap used: {} KiB, free: {} KiB", used_kib, free_kib);
+        }
+
+        last_used_kib = used_kib;
+        last_free_kib = free_kib;
+
+        ticker.next().await;
     }
 }
