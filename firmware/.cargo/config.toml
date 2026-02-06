@@ -6,3 +6,5 @@ target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "info"
+SSID = ""
+WIRELESS_PSK = ""

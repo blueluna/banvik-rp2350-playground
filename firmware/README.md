@@ -1,21 +1,84 @@
 # RP2350 Playground Rust Firmware
 
-```shell
-probe-rs download --probe 2e8a:000c firmware/43439A0.bin --binary-format bin --chip RP235x --base-address 0x10100000
-probe-rs download --probe 2e8a:000c firmware/43439A0_clm.bin --binary-format bin --chip RP235x --base-address 0x10140000
-```
+## Functions
 
-## Hookup
+### Buttons
 
+4 x buttons with debouncing
 
-| 40-pin  | Pico 2 W | Description |
-| ------- | -------- | ------------|
-|       1 |      3V3 | Power supply |
-|       6 |      GND | Ground |
-|      19 |      GP3 | SPI controller output |
-|      23 |      GP2 | SPI serial clock |
-|      24 |      GP5 | SPI chip select |
-|      15 |      GP6 | Data/Command |
-|      13 |      GP7 | Display Reset |
-|      11 |      GP8 | Display busy |
++----------+---------+
+| Function | GPIO    |
++----------+---------+
+| BUTTON 1 | GPIO 39 |
+| BUTTON 2 | GPIO 38 |
+| BUTTON 3 | GPIO 37 |
+| BUTTON 4 | GPIO 36 |
++----------+---------+
 
+### LED PWM
+
+4 x LED PWM driver
+
++----------+---------+
+| Function | GPIO    |
++----------+---------+
+|    PWM 1 | GPIO 35 |
+|    PWM 2 | GPIO 34 |
+|    PWM 3 | GPIO 33 |
+|    PWM 4 | GPIO 32 |
++----------+---------+
+
+### Smart Led Driver
+
+TXB0102DCT
+
++----------+---------+
+| Function | GPIO    |
++----------+---------+
+|      CLK | GPIO 30 |
+|      DAT | GPIO 31 |
++----------+---------+
+
+### Qwiic / Stemma / I2C
+
+2 x ports
+
++----------+---------+
+| Function | GPIO    |
++----------+---------+
+|    SCL 1 | GPIO 17 |
+|    SDA 1 | GPIO 16 |
+|    SCL 2 | GPIO 15 |
+|    SDA 2 | GPIO 14 |
++----------+---------+
+
+### I2S amplifier
+
+MAX98357A
+
++----------+---------+
+| Function | GPIO    |
++----------+---------+
+|      BCK | GPIO 21 |
+|     LRCK | GPIO 22 |
+|     DATA | GPIO 20 |
+| SHUTDOWN | GPIO 19 |
++----------+---------+
+
+## Verified
+
+ - [x] RP2350
+ - [x] Flash
+ - [x] PSRAM
+ - [x] PWM leds
+ - [x] I2S
+ - [x] Buttons
+ - [x] Smart led (WS2812)
+ - [ ] Smart led (AP102)
+ - [x] Wireless 802.11
+ - [ ] Wireless Bluetooth
+ - [ ] I2C / Qwiic / Stemma 1
+ - [ ] I2C / Qwiic / Stemma 2
+ - [ ] ADC input
+ - [ ] GPIO header
+ - [ ] SPI

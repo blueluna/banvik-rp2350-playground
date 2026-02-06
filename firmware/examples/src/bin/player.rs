@@ -14,6 +14,8 @@ use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
 use embassy_rp::pwm::{Pwm, PwmOutput, SetDutyCycle};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker, Timer};
 use smart_leds::RGB8;
 use xmrs::module::Module;
@@ -46,6 +48,15 @@ bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO1>;
 });
 
+const BUTTON_1: u32 = 1 << 0;
+const BUTTON_2: u32 = 1 << 1;
+const BUTTON_3: u32 = 1 << 2;
+const BUTTON_4: u32 = 1 << 3;
+
+const NUM_LEDS: usize = 8;
+
+static BUTTONS_CHANNEL: PubSubChannel<CriticalSectionRawMutex, u32, 4, 4, 1> = PubSubChannel::new();
+
 struct Controls<'a> {
     button_1: Input<'a>,
     button_2: Input<'a>,
@@ -59,18 +70,30 @@ struct Controls<'a> {
 
 #[embassy_executor::task]
 async fn buttons_task(controls: &'static mut Controls<'static>) -> ! {
-    let mut button_states = (false, false, false, false);
+    let mut button_states = 0u32;
     let mut button_level = (0u16, 0u16, 0u16, 0u16);
+
+    let buttons_publisher = BUTTONS_CHANNEL.publisher().unwrap();
 
     let mut ticker = Ticker::every(Duration::from_millis(10));
 
     loop {
-        let current_button_states = (
-            controls.button_1.is_low(),
-            controls.button_2.is_low(),
-            controls.button_3.is_low(),
-            controls.button_4.is_low(),
-        );
+        let current_button_states = {
+            let mut states = 0u32;
+            if controls.button_1.is_low() {
+                states |= BUTTON_1;
+            }
+            if controls.button_2.is_low() {
+                states |= BUTTON_2;
+            }
+            if controls.button_3.is_low() {
+                states |= BUTTON_3;
+            }
+            if controls.button_4.is_low() {
+                states |= BUTTON_4;
+            }
+            states
+        };
         button_level.0 = button_level.0.saturating_sub(256);
         button_level.1 = button_level.1.saturating_sub(256);
         button_level.2 = button_level.2.saturating_sub(256);
@@ -78,26 +101,19 @@ async fn buttons_task(controls: &'static mut Controls<'static>) -> ! {
 
         if current_button_states != button_states {
             button_states = current_button_states;
-            if button_states.0 {
+            if button_states & BUTTON_1 == BUTTON_1 {
                 button_level.0 = 32767;
             }
-            if button_states.1 {
+            if button_states & BUTTON_2 == BUTTON_2 {
                 button_level.1 = 32767;
             }
-            if button_states.2 {
+            if button_states & BUTTON_3 == BUTTON_3 {
                 button_level.2 = 32767;
             }
-            if button_states.3 {
+            if button_states & BUTTON_4 == BUTTON_4 {
                 button_level.3 = 32767;
             }
-
-            defmt::info!(
-                "Buttons - 1: {}, 2: {}, 3: {}, 4: {}",
-                button_states.0,
-                button_states.1,
-                button_states.2,
-                button_states.3,
-            );
+            buttons_publisher.publish_immediate(button_states);
         }
 
         let _ = controls.led_1.set_duty_cycle(32767 - button_level.0);
@@ -118,6 +134,9 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
     let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
     let (mut back_buffer, mut front_buffer) = dma_buffer.split_at_mut(BUFFER_SIZE);
 
+
+    let mut buttons_subscriber = BUTTONS_CHANNEL.subscriber().unwrap();
+
     let music_module = if let Ok(m) = Module::load(MODULE_DATA) {
         defmt::info!("Successfully loaded module: {}", m.name.as_str());
         m
@@ -134,11 +153,24 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
 
     const MULTIPLIER: f32 = 4095.0;
     let mut progress = 0;
+    let mut _button_state = 0;
+    let mut paused = false;
 
     loop {
         // trigger transfer of front buffer data to the pio fifo
         // but don't await the returned future, yet
         let dma_future = i2s.write(front_buffer);
+
+        while let Some(state) = buttons_subscriber.try_next_message_pure() {
+            if (state & BUTTON_1) == BUTTON_1 {
+                paused = !paused;
+                music_player.pause(paused);
+            }
+            if (state & BUTTON_2) == BUTTON_2 {
+                music_player = xmrsplayer::xmrsplayer::XmrsPlayer::new(&music_module, SAMPLE_RATE as f32, 0, false);
+            }
+            _button_state = state;
+        }
 
         // fill back buffer with fresh audio samples before awaiting the dma future
         for s in back_buffer.iter_mut() {
@@ -218,7 +250,6 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut pio1 = Pio::new(peripherals.PIO1, Irqs);
 
-    const NUM_LEDS: usize = 50;
     let mut data = [RGB8::default(); NUM_LEDS];
 
     let program = PioWs2812Program::new(&mut pio1.common);
@@ -294,15 +325,13 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(unwrap!(audio_task(I2S.init(i2s))));
     spawner.spawn(unwrap!(heap_stats_task()));
 
-    let mut ticker = Ticker::every(Duration::from_millis(50));
+    let mut ticker = Ticker::every(Duration::from_millis(10));
     let mut start_index = 0u8;
 
-
-    defmt::info!("Enter main loop");
-
     loop {
-        for i in 0..NUM_LEDS {
-            data[i] = wheel(start_index.wrapping_add(i as u8)) / 16;
+        for i in 0u8..(NUM_LEDS as u8) {
+            let n = i.wrapping_mul(16);
+            data[i as usize] = wheel(start_index.wrapping_add(n)) / 16;
         }
         ws2812.write(&data).await;
         ticker.next().await;

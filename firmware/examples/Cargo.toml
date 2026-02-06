@@ -26,13 +26,12 @@ embedded-storage = "0.3.1"
 
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt", "executor-interrupt"] }
 embassy-futures = { version = "0.1" }
+embassy-net = { version = "0.8", features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet", "dns", "proto-ipv4"] }
 embassy-rp = { version = "0.9", features = ["binary-info", "defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
 embassy-sync = { version = "0.7" }
 embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
 
 heapless = { version = "0.9" }
-
-nanomp3 = { git = "https://github.com/wavey-ai/nanomp3.git", branch = "master" }
 
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 

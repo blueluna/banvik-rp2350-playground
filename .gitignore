@@ -35,3 +35,9 @@ fp-info-cache
 
 # Local project settings
 *.kicad_prl
+
+# Cargo build artifacts
+firmware/target/
+**/.idea
+
+firmware/music/
