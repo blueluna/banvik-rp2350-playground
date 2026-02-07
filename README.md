@@ -2,7 +2,7 @@
 
 A Raspberry Pi Pico 2 (RP2350B) development board.
 
-![PCB image](rp2350-playground.jpg)
+![PCB image](rp2350-playground.png)
 
  - Interface for four arcade buttons with LEDs. Supporting PWN control of LEDs.
  - Interface for smart LEDs (WS2812/SK6812/APA102/SK9822)
