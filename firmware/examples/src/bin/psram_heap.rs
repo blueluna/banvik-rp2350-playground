@@ -29,9 +29,9 @@ const BIT_DEPTH: u32 = 16;
 #[unsafe(link_section = ".bi_entries")]
 #[used]
 pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
-    embassy_rp::binary_info::rp_program_name!(c"Blinky Example"),
+    embassy_rp::binary_info::rp_program_name!(c"PSRAM heap example"),
     embassy_rp::binary_info::rp_program_description!(
-        c"An example that cycles a WS2812 LED strip and fades RGB LEDs based on button presses."
+        c"An example that uses PSRAM for heap storage"
     ),
     embassy_rp::binary_info::rp_cargo_version!(),
     embassy_rp::binary_info::rp_program_build_attribute!(),

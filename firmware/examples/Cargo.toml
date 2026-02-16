@@ -17,6 +17,7 @@ defmt-rtt = "1.1"
 efmt = { git = "https://github.com/dragonnn/efmt.git", branch = "main" , features = ["heapless09"] }
 
 embedded-alloc = "0.7"
+embedded-devices = { version = "0.10.3", features = ["bosch-bmp390", "texas_instruments-tmp117"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = "0.3.0"
@@ -40,6 +41,8 @@ panic-probe = { version = "1.0", features = ["print-defmt"] }
 
 smart-leds = "0.4.0"
 static_cell = "2.1"
+
+uom = { version = "0.37", default-features = false, features = ["si", "f32"] }
 
 xmrs = { version = "0.9.9", default-features =  false, features = ["import", "libm"] }
 xmrsplayer = { version = "0.9.7", default-features =  false, features = ["libm"] }

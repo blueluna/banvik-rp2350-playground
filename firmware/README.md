@@ -1,76 +1,52 @@
 # RP2350 Playground Rust Firmware
 
-## Functions
+## Examples
 
-### Buttons
+### Blinky
 
-4 x buttons with debouncing
+Blink with WS2812 smart LEDs.
 
-| Function | GPIO    |
-| -------- | ------- |
-| BUTTON 1 | GPIO 39 |
-| BUTTON 2 | GPIO 38 |
-| BUTTON 3 | GPIO 37 |
-| BUTTON 4 | GPIO 36 |
+```shell
+cargo run --release --bin blinky
+```
 
-### LED PWM
+### PSRAM heap
 
-4 x LED PWM driver
+Set up PSRAM as heap for allocator.
 
-| Function | GPIO    |
-| -------- | ------- |
-|    PWM 1 | GPIO 35 |
-|    PWM 2 | GPIO 34 |
-|    PWM 3 | GPIO 33 |
-|    PWM 4 | GPIO 32 |
+```shell
+cargo run --release --bin psram_heap
+```
 
-### Smart Led Driver
+### Audio
 
-TXB0102DCT, 3.3V to 5V level translator
+Play a sine wave on the speaker.
 
-| Function | GPIO    |
-| -------- | ------- |
-|      CLK | GPIO 30 |
-|      DAT | GPIO 31 |
+```shell
+cargo run --release --bin audio
+```
 
-### Qwiic / Stemma / I2C
+### Mod Player
 
-2 x ports
+Play a music mod file.
 
-| Function | GPIO    |
-| -------- | ------- |
-|    SCL 1 | GPIO 17 |
-|    SDA 1 | GPIO 16 |
-|    SCL 2 | GPIO 15 |
-|    SDA 2 | GPIO 14 |
+```shell
+cargo run --release --bin player
+```
 
-### I2S amplifier
+### MP3 Player
 
-MAX98357A, I2S mono audio amplifier
+Play a music mp3 file. Currently not functional.
 
-Only left channel.
+```shell
+probe-rs download --probe 2e8a:000c music.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
+cargo run --release --bin mp3_player
+```
 
-| Function | GPIO    |
-| -------- | ------- |
-|      BCK | GPIO 21 |
-|     LRCK | GPIO 22 |
-|     DATA | GPIO 20 |
-| SHUTDOWN | GPIO 19 |
+### Wireless 802.11
 
-## Verified
+Connect to Wi-Fi and get an IPv4 address.
 
- - [X] RP2350
- - [X] Flash
- - [X] PSRAM
- - [X] PWM leds
- - [X] I2S
- - [X] Buttons
- - [X] Smart led (WS2812)
- - [ ] Smart led (AP102)
- - [X] Wireless 802.11
- - [ ] Wireless Bluetooth
- - [ ] I2C / Qwiic / Stemma 1
- - [ ] I2C / Qwiic / Stemma 2
- - [ ] ADC input
- - [ ] GPIO header
- - [ ] SPI
+```shell
+SSID=<ssid> WIRELESS_PSK=<Wi-Fi password> cargo run --release --bin wireless_80211
+```

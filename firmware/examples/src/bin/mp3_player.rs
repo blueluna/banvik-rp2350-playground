@@ -14,7 +14,6 @@ use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::pwm::{Pwm, PwmOutput, SetDutyCycle};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
@@ -31,10 +30,8 @@ const BIT_DEPTH: u32 = 16;
 #[unsafe(link_section = ".bi_entries")]
 #[used]
 pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
-    embassy_rp::binary_info::rp_program_name!(c"Blinky Example"),
-    embassy_rp::binary_info::rp_program_description!(
-        c"An example that cycles a WS2812 LED strip and fades RGB LEDs based on button presses."
-    ),
+    embassy_rp::binary_info::rp_program_name!(c"MP3 Example"),
+    embassy_rp::binary_info::rp_program_description!(c"An example that plays an MP3 music file."),
     embassy_rp::binary_info::rp_cargo_version!(),
     embassy_rp::binary_info::rp_program_build_attribute!(),
 ];
