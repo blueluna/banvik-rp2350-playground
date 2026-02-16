@@ -6,20 +6,19 @@ extern crate alloc;
 use alloc::vec;
 use core::mem;
 use defmt::unwrap;
-use embedded_alloc::LlffHeap as Heap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0, PIO1};
 use embassy_rp::pio::Pio;
-use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
+use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::pwm::{Pwm, PwmOutput, SetDutyCycle};
 use embassy_time::{Duration, Ticker, Timer};
+use embedded_alloc::LlffHeap as Heap;
 use smart_leds::RGB8;
 
 use {defmt_rtt as _, panic_probe as _};
-
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -105,15 +104,13 @@ async fn buttons_task(controls: &'static mut Controls<'static>) -> ! {
     }
 }
 
-
-
 #[embassy_executor::task]
 async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
-
     i2s.start();
 
     const BUFFER_SIZE: usize = 960;
-    static DMA_BUFFER: static_cell::StaticCell<[u32; BUFFER_SIZE * 2]> = static_cell::StaticCell::new();
+    static DMA_BUFFER: static_cell::StaticCell<[u32; BUFFER_SIZE * 2]> =
+        static_cell::StaticCell::new();
     let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
     let (mut back_buffer, mut front_buffer) = dma_buffer.split_at_mut(BUFFER_SIZE);
 
@@ -172,7 +169,10 @@ async fn main(spawner: Spawner) -> ! {
     let psram = {
         use embassy_rp::qmi_cs1::QmiCs1;
         let psram_config = embassy_rp::psram::Config::aps6404l();
-        embassy_rp::psram::Psram::new(QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0), psram_config)
+        embassy_rp::psram::Psram::new(
+            QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0),
+            psram_config,
+        )
     };
 
     if let Ok(psram) = psram {
@@ -185,7 +185,11 @@ async fn main(spawner: Spawner) -> ! {
                 HEAP.init(address, size);
                 (address, size)
             };
-            defmt::info!("Heap initialized in PSRAM at {:08x}, size: {}", address, size);
+            defmt::info!(
+                "Heap initialized in PSRAM at {:08x}, size: {}",
+                address,
+                size
+            );
         }
     } else {
         defmt::warn!("Failed to initialize PSRAM, using internal RAM for heap");
@@ -260,7 +264,8 @@ async fn main(spawner: Spawner) -> ! {
         &program,
     );
 
-    static I2S: static_cell::StaticCell<PioI2sOut<'static, PIO0, 0>> = static_cell::StaticCell::new();
+    static I2S: static_cell::StaticCell<PioI2sOut<'static, PIO0, 0>> =
+        static_cell::StaticCell::new();
 
     Timer::after_millis(10).await;
     audio_shutdown.set_low();
@@ -283,7 +288,6 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut ticker = Ticker::every(Duration::from_millis(50));
     let mut start_index = 0u8;
-
 
     defmt::info!("Enter main loop");
 

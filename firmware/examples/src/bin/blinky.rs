@@ -162,7 +162,6 @@ async fn main(spawner: Spawner) -> ! {
     let mut ticker = Ticker::every(Duration::from_millis(50));
     let mut start_index = 0u8;
 
-
     defmt::info!("Enter main loop");
 
     loop {

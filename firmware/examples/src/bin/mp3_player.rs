@@ -14,21 +14,18 @@ use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::pwm::{Pwm, PwmOutput, SetDutyCycle};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
 use smart_leds::RGB8;
-use xmrs::module::Module;
-use xmrsplayer;
-
-const MODULE_DATA: &[u8] = include_bytes!("stardstm.mod");
 
 use {defmt_rtt as _, panic_probe as _};
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-const SAMPLE_RATE: u32 = 11_025;
+const SAMPLE_RATE: u32 = 11_025 * 4;
 const BIT_DEPTH: u32 = 16;
 
 #[unsafe(link_section = ".bi_entries")]
@@ -125,7 +122,11 @@ async fn buttons_task(controls: &'static mut Controls<'static>) -> ! {
 
 #[embassy_executor::task]
 async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
-    const BUFFER_SIZE: usize = 128;
+    let mut decoder = nanomp3::Decoder::new();
+    const BUFFER_SIZE: usize = nanomp3::MAX_SAMPLES_PER_FRAME;
+
+    let mut pcm_buffer = [0f32; BUFFER_SIZE];
+
     static DMA_BUFFER: static_cell::StaticCell<[u32; BUFFER_SIZE * 2]> =
         static_cell::StaticCell::new();
     let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
@@ -133,66 +134,110 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
 
     let mut buttons_subscriber = BUTTONS_CHANNEL.subscriber().unwrap();
 
-    let music_module = if let Ok(m) = Module::load(MODULE_DATA) {
-        defmt::info!("Successfully loaded module: {}", m.name.as_str());
-        m
-    } else {
-        defmt::error!("Failed to load module");
-        Module::default()
-    };
-
-    let mut music_player =
-        xmrsplayer::xmrsplayer::XmrsPlayer::new(&music_module, SAMPLE_RATE as f32, 0, false);
-
-    music_player.set_max_loop_count(1);
-
     i2s.start();
 
+    // probe-rs download --probe 2e8a:000c music/06\ Left\ Behind.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
+    let file = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 1811590) };
+
     const MULTIPLIER: f32 = 4095.0;
-    let mut progress = 0;
     let mut _button_state = 0;
-    let mut paused = false;
+    let mut offset = 0;
+    let mut in_buffer = [0u8; 32 * 1024];
+    let end = offset + in_buffer.len();
+    in_buffer.copy_from_slice(file[offset..end].as_ref());
+    let mut mp3_buffer = &in_buffer[..];
+    offset = end;
+    let mut front_sample_count = 0;
+    let mut volume = MULTIPLIER;
 
     loop {
         // trigger transfer of front buffer data to the pio fifo
         // but don't await the returned future, yet
-        let dma_future = i2s.write(front_buffer);
+        let dma_future = i2s.write(&front_buffer[..front_sample_count]);
 
         while let Some(state) = buttons_subscriber.try_next_message_pure() {
             if (state & BUTTON_1) == BUTTON_1 {
-                paused = !paused;
-                music_player.pause(paused);
+                volume = MULTIPLIER;
             }
             if (state & BUTTON_2) == BUTTON_2 {
-                music_player = xmrsplayer::xmrsplayer::XmrsPlayer::new(
-                    &music_module,
-                    SAMPLE_RATE as f32,
-                    0,
-                    false,
-                );
+                volume = 0.0;
+            }
+            if (state & BUTTON_3) == BUTTON_3 {
+                volume = 16384.0;
             }
             _button_state = state;
         }
 
         // fill back buffer with fresh audio samples before awaiting the dma future
-        for s in back_buffer.iter_mut() {
-            if let Some((left, right)) = music_player.sample(false) {
-                let ls = (left * MULTIPLIER) as i16;
-                let rs = (right * MULTIPLIER) as i16;
-                *s = (ls as u16 as u32) | ((rs as u16 as u32) << 16);
-            }
-        }
 
-        let table_index = music_player.get_current_table_index();
-        if table_index != progress {
-            progress = table_index;
-            defmt::info!("Index: {}", table_index);
+        let (consumed, info) = decoder.decode(mp3_buffer, &mut pcm_buffer);
+
+        mp3_buffer = &mp3_buffer[consumed..];
+
+        let left = mp3_buffer.len();
+
+        let sample_count = if let Some(info) = info {
+            /*
+            let channel = match info.channels {
+                nanomp3::Channels::Mono => "Mono",
+                nanomp3::Channels::Stereo => "Stereo",
+            };
+            defmt::info!("Decoded MP3 frame: consumed {} produced {} samples, {}, {} Hz, {} kbps", consumed, info.samples_produced, channel, info.sample_rate, info.bitrate);
+            */
+            match info.channels {
+                nanomp3::Channels::Mono => {
+                    for n in 0..info.samples_produced {
+                        let s = (pcm_buffer[n] * volume) as i16;
+                        back_buffer[n] = (s as u16 as u32) | ((s as u16 as u32) << 16);
+                    }
+                    info.samples_produced
+                }
+                nanomp3::Channels::Stereo => {
+                    let sample_count = info.samples_produced / 2;
+                    for n in 0..sample_count {
+                        let ls = (pcm_buffer[n * 2] * volume) as i16;
+                        let rs = (pcm_buffer[n * 2 + 1] * volume) as i16;
+                        // let s = ((ls as i32 + rs as i32) / 2) as i16;
+                        back_buffer[n] = (ls as u32) | ((rs as u32) << 16);
+                    }
+                    sample_count
+                }
+            }
+        } else {
+            defmt::warn!("Failed to decode MP3 frame");
+            back_buffer.fill(0);
+            back_buffer.len()
+        };
+
+        if left < (in_buffer.len() / 2) {
+            let pos = in_buffer.len() - left;
+            in_buffer.copy_within(pos.., 0);
+            let len = pos;
+            let (len, reload) = if (offset + len) > file.len() {
+                let len = file.len() - offset;
+                (len, true)
+            } else {
+                (len, false)
+            };
+            let end = offset + len;
+            // defmt::info!("Refill {} {} {} {} {}", offset, left, pos, len, end);
+            in_buffer[left..left + len].copy_from_slice(file[offset..end].as_ref());
+            if reload {
+                offset = in_buffer.len();
+                decoder = nanomp3::Decoder::new();
+                in_buffer.copy_from_slice(file[..offset].as_ref());
+                // defmt::info!("MP3 buffer empty, restarting");
+            } else {
+                offset = end;
+            }
+            mp3_buffer = &in_buffer[..];
         }
 
         // now await the dma future. once the dma finishes, the next buffer needs to be queued
         // within DMA_DEPTH / SAMPLE_RATE = 960 / 11025 seconds = 87.1ms
         dma_future.await;
         mem::swap(&mut back_buffer, &mut front_buffer);
+        front_sample_count = sample_count;
     }
 }
 
@@ -213,15 +258,13 @@ fn wheel(mut wheel_pos: u8) -> RGB8 {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
-    let mut rp_configuration: embassy_rp::config::Config = Default::default();
-    rp_configuration.clocks = embassy_rp::clocks::ClockConfig::crystal(12_000_000);
-    let peripherals = embassy_rp::init(rp_configuration);
+    let peripherals = embassy_rp::init(Default::default());
+
+    defmt::info!("Entry");
 
     let psram = {
         use embassy_rp::qmi_cs1::QmiCs1;
-        let mut psram_config = embassy_rp::psram::Config::aps6404l();
-        psram_config.clock_hz = embassy_rp::clocks::clk_sys_freq();
-        psram_config.max_mem_freq = 144_000_000;
+        let psram_config = embassy_rp::psram::Config::aps6404l();
         embassy_rp::psram::Psram::new(
             QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0),
             psram_config,
@@ -229,12 +272,20 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     if let Ok(psram) = psram {
+        defmt::info!("PSRAM initialized successfully, using PSRAM for heap");
+
         {
-            unsafe {
+            let (address, size) = unsafe {
                 let address = psram.base_address() as usize;
                 let size = psram.size() as usize;
                 HEAP.init(address, size);
-            }
+                (address, size)
+            };
+            defmt::info!(
+                "Heap initialized in PSRAM at {:08x}, size: {}",
+                address,
+                size
+            );
         }
     } else {
         defmt::warn!("Failed to initialize PSRAM, using internal RAM for heap");
@@ -243,10 +294,12 @@ async fn main(spawner: Spawner) -> ! {
         static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
 
         #[allow(static_mut_refs)]
-        unsafe {
+        let (address, size) = unsafe {
             let address = HEAP_MEM.as_ptr() as usize;
             HEAP.init(address, HEAP_SIZE);
-        }
+            (address, HEAP_SIZE)
+        };
+        defmt::info!("Heap initialized at addr: {:08x}, size: {}", address, size);
     }
 
     let mut pio1 = Pio::new(peripherals.PIO1, Irqs);

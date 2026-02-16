@@ -59,15 +59,15 @@ Only left channel.
 
 ## Verified
 
- - [x] RP2350
- - [x] Flash
- - [x] PSRAM
- - [x] PWM leds
- - [x] I2S
- - [x] Buttons
- - [x] Smart led (WS2812)
+ - [X] RP2350
+ - [X] Flash
+ - [X] PSRAM
+ - [X] PWM leds
+ - [X] I2S
+ - [X] Buttons
+ - [X] Smart led (WS2812)
  - [ ] Smart led (AP102)
- - [x] Wireless 802.11
+ - [X] Wireless 802.11
  - [ ] Wireless Bluetooth
  - [ ] I2C / Qwiic / Stemma 1
  - [ ] I2C / Qwiic / Stemma 2

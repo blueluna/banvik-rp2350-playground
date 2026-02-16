@@ -7,13 +7,13 @@ use alloc::vec;
 use cyw43::aligned_bytes;
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
 use defmt::unwrap;
-use embedded_alloc::LlffHeap as Heap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{PIO0};
+use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio::Pio;
 use embassy_time::{Duration, Ticker};
+use embedded_alloc::LlffHeap as Heap;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -27,13 +27,10 @@ static HEAP: Heap = Heap::empty();
 #[used]
 pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
     embassy_rp::binary_info::rp_program_name!(c"802.11 Example"),
-    embassy_rp::binary_info::rp_program_description!(
-        c"An 802.11 test program"
-    ),
+    embassy_rp::binary_info::rp_program_description!(c"An 802.11 test program"),
     embassy_rp::binary_info::rp_cargo_version!(),
     embassy_rp::binary_info::rp_program_build_attribute!(),
 ];
-
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
@@ -64,7 +61,10 @@ async fn main(spawner: Spawner) -> ! {
     let psram = {
         use embassy_rp::qmi_cs1::QmiCs1;
         let psram_config = embassy_rp::psram::Config::aps6404l();
-        embassy_rp::psram::Psram::new(QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0), psram_config)
+        embassy_rp::psram::Psram::new(
+            QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0),
+            psram_config,
+        )
     };
 
     if let Ok(psram) = psram {
@@ -77,7 +77,11 @@ async fn main(spawner: Spawner) -> ! {
                 HEAP.init(address, size);
                 (address, size)
             };
-            defmt::info!("Heap initialized in PSRAM at {:08x}, size: {}", address, size);
+            defmt::info!(
+                "Heap initialized in PSRAM at {:08x}, size: {}",
+                address,
+                size
+            );
         }
     } else {
         defmt::warn!("Failed to initialize PSRAM, using internal RAM for heap");
@@ -145,15 +149,24 @@ async fn main(spawner: Spawner) -> ! {
     let seed = rng.next_u64();
 
     // Init network stack
-    static NET_RESOURCES: static_cell::StaticCell<embassy_net::StackResources<5>> = static_cell::StaticCell::new();
-    let (net_stack, runner) = embassy_net::new(net_device, config, NET_RESOURCES.init(embassy_net::StackResources::new()), seed);
+    static NET_RESOURCES: static_cell::StaticCell<embassy_net::StackResources<5>> =
+        static_cell::StaticCell::new();
+    let (net_stack, runner) = embassy_net::new(
+        net_device,
+        config,
+        NET_RESOURCES.init(embassy_net::StackResources::new()),
+        seed,
+    );
 
     spawner.spawn(unwrap!(net_task(runner)));
 
     let _wireless_hw_address = net_stack.hardware_address();
 
     while let Err(err) = control
-        .join(WIFI_NETWORK, cyw43::JoinOptions::new(WIFI_PASSWORD.as_bytes()))
+        .join(
+            WIFI_NETWORK,
+            cyw43::JoinOptions::new(WIFI_PASSWORD.as_bytes()),
+        )
         .await
     {
         defmt::info!("join failed: {:?}", err);

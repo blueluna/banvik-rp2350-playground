@@ -10,6 +10,8 @@ resolver = "3"
 debug = 2
 lto = true
 opt-level = 'z'
+codegen-units = 1
+panic = "abort"
 
 [profile.dev]
 debug = 2
@@ -26,3 +28,4 @@ embassy-net = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-rp = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-time = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
+nanomp3 = { git = "https://github.com/wavey-ai/nanomp3", branch = "master" }

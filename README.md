@@ -9,4 +9,8 @@ A Raspberry Pi Pico 2 (RP2350B) development board.
  - Two Qwiic/STEMMA QT ports
  - Speaker interface (I2S)
  - Raspberry Pi Debug Probe compatible debug port
+ - Raspberry Pi Radio Module 2 (RMC20452T)
 
+## Rust firmware
+
+See [firmware](firmware/README.md).

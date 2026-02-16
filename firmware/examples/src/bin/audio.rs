@@ -18,17 +18,13 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
 use smart_leds::RGB8;
-use xmrs::module::Module;
-use xmrsplayer;
-
-const MODULE_DATA: &[u8] = include_bytes!("stardstm.mod");
 
 use {defmt_rtt as _, panic_probe as _};
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-const SAMPLE_RATE: u32 = 11_025;
+const SAMPLE_RATE: u32 = 44_100;
 const BIT_DEPTH: u32 = 16;
 
 #[unsafe(link_section = ".bi_entries")]
@@ -125,7 +121,8 @@ async fn buttons_task(controls: &'static mut Controls<'static>) -> ! {
 
 #[embassy_executor::task]
 async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
-    const BUFFER_SIZE: usize = 128;
+    const BUFFER_SIZE: usize = 512;
+
     static DMA_BUFFER: static_cell::StaticCell<[u32; BUFFER_SIZE * 2]> =
         static_cell::StaticCell::new();
     let dma_buffer = DMA_BUFFER.init_with(|| [0u32; BUFFER_SIZE * 2]);
@@ -133,60 +130,48 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
 
     let mut buttons_subscriber = BUTTONS_CHANNEL.subscriber().unwrap();
 
-    let music_module = if let Ok(m) = Module::load(MODULE_DATA) {
-        defmt::info!("Successfully loaded module: {}", m.name.as_str());
-        m
-    } else {
-        defmt::error!("Failed to load module");
-        Module::default()
-    };
-
-    let mut music_player =
-        xmrsplayer::xmrsplayer::XmrsPlayer::new(&music_module, SAMPLE_RATE as f32, 0, false);
-
-    music_player.set_max_loop_count(1);
-
     i2s.start();
 
     const MULTIPLIER: f32 = 4095.0;
-    let mut progress = 0;
     let mut _button_state = 0;
-    let mut paused = false;
+    let mut volume = MULTIPLIER;
+
+    // Generate a 440 Hz sine wave into `pcm_buffer` as i16 samples.
+    let mut phase: f32 = 0.0;
+    const TWO_PI: f32 = 2.0 * core::f32::consts::PI;
+    let mut frequency: f32 = 440.0;
+    let mut phase_inc: f32 = TWO_PI * frequency / (SAMPLE_RATE as f32);
 
     loop {
         // trigger transfer of front buffer data to the pio fifo
         // but don't await the returned future, yet
-        let dma_future = i2s.write(front_buffer);
+        let dma_future = i2s.write(&front_buffer);
+
+        for dst in back_buffer.iter_mut() {
+            let s = (libm::sinf(phase) * volume) as i16;
+            *dst = (s as u16 as u32) | ((s as u16 as u32) << 16);
+
+            phase += phase_inc;
+            if phase >= TWO_PI {
+                phase -= TWO_PI;
+            }
+        }
 
         while let Some(state) = buttons_subscriber.try_next_message_pure() {
             if (state & BUTTON_1) == BUTTON_1 {
-                paused = !paused;
-                music_player.pause(paused);
+                frequency -= 0.5;
+                phase_inc = TWO_PI * frequency / (SAMPLE_RATE as f32);
+                defmt::info!("Frequency: {} Hz", frequency);
             }
             if (state & BUTTON_2) == BUTTON_2 {
-                music_player = xmrsplayer::xmrsplayer::XmrsPlayer::new(
-                    &music_module,
-                    SAMPLE_RATE as f32,
-                    0,
-                    false,
-                );
+                volume = 0.0;
+            }
+            if (state & BUTTON_3) == BUTTON_3 {
+                frequency += 0.5;
+                phase_inc = TWO_PI * frequency / (SAMPLE_RATE as f32);
+                defmt::info!("Frequency: {} Hz", frequency);
             }
             _button_state = state;
-        }
-
-        // fill back buffer with fresh audio samples before awaiting the dma future
-        for s in back_buffer.iter_mut() {
-            if let Some((left, right)) = music_player.sample(false) {
-                let ls = (left * MULTIPLIER) as i16;
-                let rs = (right * MULTIPLIER) as i16;
-                *s = (ls as u16 as u32) | ((rs as u16 as u32) << 16);
-            }
-        }
-
-        let table_index = music_player.get_current_table_index();
-        if table_index != progress {
-            progress = table_index;
-            defmt::info!("Index: {}", table_index);
         }
 
         // now await the dma future. once the dma finishes, the next buffer needs to be queued
@@ -219,9 +204,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let psram = {
         use embassy_rp::qmi_cs1::QmiCs1;
-        let mut psram_config = embassy_rp::psram::Config::aps6404l();
-        psram_config.clock_hz = embassy_rp::clocks::clk_sys_freq();
-        psram_config.max_mem_freq = 144_000_000;
+        let psram_config = embassy_rp::psram::Config::aps6404l();
         embassy_rp::psram::Psram::new(
             QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0),
             psram_config,
