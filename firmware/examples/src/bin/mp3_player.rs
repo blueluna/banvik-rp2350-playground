@@ -134,7 +134,7 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
     i2s.start();
 
     // probe-rs download --probe 2e8a:000c music/06\ Left\ Behind.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
-    let file = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 1293120) };
+    let file = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 2417328) };
 
     const MULTIPLIER: f32 = 4095.0;
     let mut _button_state = 0;
@@ -188,14 +188,15 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
                     info.samples_produced
                 }
                 nanomp3::Channels::Stereo => {
-                    let sample_count = info.samples_produced / 2;
-                    for n in 0..sample_count {
-                        let ls = (pcm_buffer[n * 2] * volume) as i16;
-                        let rs = (pcm_buffer[n * 2 + 1] * volume) as i16;
-                        // let s = ((ls as i32 + rs as i32) / 2) as i16;
-                        back_buffer[n] = (ls as u32) | ((rs as u32) << 16);
+                    for n in 0..info.samples_produced {
+                        let index = n << 1;
+                        let left = pcm_buffer[index];
+                        let right = pcm_buffer[index | 1];
+                        let left_sample = (left * volume) as i16;
+                        let right_sample = (right * volume) as i16;
+                        back_buffer[n] = (left_sample as u16 as u32) | ((right_sample as u16 as u32) << 16);
                     }
-                    sample_count
+                    info.samples_produced
                 }
             }
         } else {
