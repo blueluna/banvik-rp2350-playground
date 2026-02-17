@@ -3,7 +3,7 @@
 
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::pwm::{Pwm};
+use embassy_rp::pwm::Pwm;
 use embassy_time::{Duration, Ticker};
 use embedded_devices::devices::texas_instruments::tmp117::{TMP117Async, address::Address};
 use embedded_devices::sensor::OneshotSensorAsync;
@@ -19,7 +19,9 @@ embassy_rp::bind_interrupts!(struct Irqs {
 #[used]
 pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
     embassy_rp::binary_info::rp_program_name!(c"TMP117 Example"),
-    embassy_rp::binary_info::rp_program_description!(c"An example that reads temperature from TMP117 sensor."),
+    embassy_rp::binary_info::rp_program_description!(
+        c"An example that reads temperature from TMP117 sensor."
+    ),
     embassy_rp::binary_info::rp_cargo_version!(),
     embassy_rp::binary_info::rp_program_build_attribute!(),
 ];

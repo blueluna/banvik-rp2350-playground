@@ -19,6 +19,11 @@ use embassy_time::{Duration, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
 use smart_leds::RGB8;
 
+const ALERT: &[u8] = include_bytes!("alert.mp3");
+const AAAAAHHHH: &[u8] = include_bytes!("aaaaahhhh.mp3");
+const HORN: &[u8] = include_bytes!("horn.mp3");
+
+
 use {defmt_rtt as _, panic_probe as _};
 
 #[global_allocator]
@@ -133,19 +138,17 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
 
     i2s.start();
 
-    // probe-rs download --probe 2e8a:000c music/06\ Left\ Behind.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
-    let file = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 1293120) };
+    let mut clip = None;
 
     const MULTIPLIER: f32 = 4095.0;
     let mut _button_state = 0;
     let mut offset = 0;
-    let mut in_buffer = [0u8; 32 * 1024];
+    let mut in_buffer = [0u8; 16 * 1024];
     let end = offset + in_buffer.len();
-    in_buffer.copy_from_slice(file[offset..end].as_ref());
     let mut mp3_buffer = &in_buffer[..];
     offset = end;
     let mut front_sample_count = 0;
-    let mut volume = MULTIPLIER;
+    let volume = MULTIPLIER;
 
     loop {
         // trigger transfer of front buffer data to the pio fifo
@@ -153,15 +156,31 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
         let dma_future = i2s.write(&front_buffer[..front_sample_count]);
 
         while let Some(state) = buttons_subscriber.try_next_message_pure() {
+            let mut changed_clip = false;
             if (state & BUTTON_1) == BUTTON_1 {
-                volume = MULTIPLIER;
+                defmt::info!("Playing alert sound");
+                clip = Some(ALERT);
+                changed_clip = true;
             }
             if (state & BUTTON_2) == BUTTON_2 {
-                volume = 0.0;
+                defmt::info!("Playing aaaaahhhh sound");
+                clip = Some(AAAAAHHHH);
+                changed_clip = true;
             }
             if (state & BUTTON_3) == BUTTON_3 {
-                volume = 16384.0;
+                defmt::info!("Playing horn sound");
+                clip = Some(HORN);
+                changed_clip = true;
             }
+            if changed_clip {
+                if let Some(clip) = clip {
+                    decoder = nanomp3::Decoder::new();
+                    let part = in_buffer.len().min(clip.len());
+                    offset = part;
+                    in_buffer[..part].copy_from_slice(clip[..part].as_ref());
+                    mp3_buffer = &in_buffer[..];
+                }
+             }
             _button_state = state;
         }
 
@@ -178,7 +197,7 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
                 nanomp3::Channels::Mono => "Mono",
                 nanomp3::Channels::Stereo => "Stereo",
             };
-            defmt::info!("Decoded MP3 frame: consumed {} produced {} samples, {}, {} Hz, {} kbps offset {}", consumed, info.samples_produced, channel, info.sample_rate, info.bitrate, offset);
+            defmt::info!("Decoded MP3 frame: consumed {} produced {} samples, {}, {} Hz, {} kbps", consumed, info.samples_produced, channel, info.sample_rate, info.bitrate);
             match info.channels {
                 nanomp3::Channels::Mono => {
                     for n in 0..info.samples_produced {
@@ -199,7 +218,6 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
                 }
             }
         } else {
-            defmt::warn!("Failed to decode MP3 frame");
             back_buffer.fill(0);
             back_buffer.len()
         };
@@ -207,23 +225,26 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
         if left < (in_buffer.len() / 2) {
             let pos = in_buffer.len() - left;
             in_buffer.copy_within(pos.., 0);
-            let len = pos;
-            let (len, reload) = if (offset + len) > file.len() {
-                let len = file.len() - offset;
-                (len, true)
-            } else {
-                (len, false)
-            };
-            let end = offset + len;
-            // defmt::info!("Refill {} {} {} {} {}", offset, left, pos, len, end);
-            in_buffer[left..left + len].copy_from_slice(file[offset..end].as_ref());
-            if reload {
-                offset = in_buffer.len();
-                decoder = nanomp3::Decoder::new();
-                in_buffer.copy_from_slice(file[..offset].as_ref());
-                // defmt::info!("MP3 buffer empty, restarting");
-            } else {
-                offset = end;
+
+            if let Some(data) = clip {
+                defmt::info!("Playing clip offset: {}, left: {}", offset, left);
+                let len = pos;
+                let (len, reload) = if (offset + len) > data.len() {
+                    let len = data.len() - offset;
+                    (len, true)
+                } else {
+                    (len, false)
+                };
+                let end = offset + len;
+                in_buffer[left..left + len].copy_from_slice(data[offset..end].as_ref());
+                if reload {
+                    clip = None;
+                } else {
+                    offset = end;
+                }
+            }
+            else {
+                in_buffer[left..].fill(0);
             }
             mp3_buffer = &in_buffer[..];
         }

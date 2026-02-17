@@ -36,11 +36,19 @@ cargo run --release --bin player
 
 ### MP3 Player
 
-Play a music mp3 file. Currently not functional.
+Play a music mp3 file. Currently only works with mono mp3 files.
 
 ```shell
-probe-rs download --probe 2e8a:000c music.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
+probe-rs download --probe 2e8a:000c examples/src/bin/menu-screen.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
 cargo run --release --bin mp3_player
+```
+
+### Soundboard
+
+Play a sound clips.
+
+```shell
+cargo run --release --bin soundboard
 ```
 
 ### Wireless 802.11
