@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use core::mem;
+use cmsis_dsp::transform::FloatRealFft;
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
@@ -17,6 +18,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
+use libm::{cosf, sqrtf};
 use smart_leds::RGB8;
 
 use {defmt_rtt as _, panic_probe as _};
@@ -49,6 +51,23 @@ const BUTTON_4: u32 = 1 << 3;
 const NUM_LEDS: usize = 64;
 
 static BUTTONS_CHANNEL: PubSubChannel<CriticalSectionRawMutex, u32, 4, 4, 1> = PubSubChannel::new();
+
+static SPECTRUM_CHANNEL: PubSubChannel<CriticalSectionRawMutex, [u8; 8], 4, 4, 1> = PubSubChannel::new();
+
+/// Input value 0 to 255 to get a color value.
+/// Colors transition r -> g -> b -> back to r.
+fn wheel(mut wheel_pos: u8) -> RGB8 {
+    wheel_pos = 255 - wheel_pos;
+    if wheel_pos < 85 {
+        return (255 - wheel_pos * 3, 0, wheel_pos * 3).into();
+    }
+    if wheel_pos < 170 {
+        wheel_pos -= 85;
+        return (0, wheel_pos * 3, 255 - wheel_pos * 3).into();
+    }
+    wheel_pos -= 170;
+    (wheel_pos * 3, 255 - wheel_pos * 3, 0).into()
+}
 
 struct Controls<'a> {
     button_1: Input<'a>,
@@ -131,10 +150,23 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
 
     let mut buttons_subscriber = BUTTONS_CHANNEL.subscriber().unwrap();
 
+    let spectrum_publisher = SPECTRUM_CHANNEL.publisher().unwrap();
+
+    const FFT_SIZE: usize = 64;
+    let fft = FloatRealFft::new(FFT_SIZE as u16).unwrap();
+    let mut fft_input = [0f32; FFT_SIZE];
+    let mut fft_output = [0f32; FFT_SIZE];
+
+    // Precompute Hann window
+    let mut hann_window = [0f32; FFT_SIZE];
+    for n in 0..FFT_SIZE {
+        hann_window[n] = 0.5 * (1.0 - cosf(2.0 * core::f32::consts::PI * n as f32 / FFT_SIZE as f32));
+    }
+
     i2s.start();
 
-    // probe-rs download --probe 2e8a:000c music/06\ Left\ Behind.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
-    let file = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 2417328) };
+    // probe-rs download --probe 2e8a:000c examples/src/bin/menu-screen.mp3 --binary-format bin --chip RP235x --base-address 0x10100000
+    let file = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 3231241) };
 
     const MULTIPLIER: f32 = 4095.0;
     let mut _button_state = 0;
@@ -148,19 +180,32 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
     let mut volume = MULTIPLIER;
 
     loop {
+        // let start_time = embassy_time::Instant::now();
         // trigger transfer of front buffer data to the pio fifo
         // but don't await the returned future, yet
         let dma_future = i2s.write(&front_buffer[..front_sample_count]);
 
         while let Some(state) = buttons_subscriber.try_next_message_pure() {
             if (state & BUTTON_1) == BUTTON_1 {
-                volume = MULTIPLIER;
+                if volume == 0.0 {
+                    volume = MULTIPLIER;
+                } else {
+                    volume = 0.0;
+                }
             }
             if (state & BUTTON_2) == BUTTON_2 {
-                volume = 0.0;
+                if volume == 0.0 {
+                    volume = MULTIPLIER;
+                } else {
+                    volume = volume * 0.5;
+                }
             }
             if (state & BUTTON_3) == BUTTON_3 {
-                volume = 16384.0;
+                if volume == 0.0 {
+                    volume = MULTIPLIER;
+                } else {
+                    volume = volume * 2.0;
+                }
             }
             _button_state = state;
         }
@@ -174,11 +219,7 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
         let left = mp3_buffer.len();
 
         let sample_count = if let Some(info) = info {
-            let channel = match info.channels {
-                nanomp3::Channels::Mono => "Mono",
-                nanomp3::Channels::Stereo => "Stereo",
-            };
-            defmt::info!("Decoded MP3 frame: consumed {} produced {} samples, {}, {} Hz, {} kbps offset {}", consumed, info.samples_produced, channel, info.sample_rate, info.bitrate, offset);
+            defmt::debug!("Decoded MP3 frame: consumed {} produced {} samples, channels {}, {} Hz, {} kbps offset {}", consumed, info.samples_produced, info.channels.num(), info.sample_rate, info.bitrate, offset);
             match info.channels {
                 nanomp3::Channels::Mono => {
                     for n in 0..info.samples_produced {
@@ -205,6 +246,59 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
             back_buffer.len()
         };
 
+        // Compute FFT spectrum from decoded audio
+        if sample_count >= FFT_SIZE {
+            // Fill FFT input with mono samples (before volume scaling)
+            for n in 0..FFT_SIZE {
+                fft_input[n] = pcm_buffer[n] * hann_window[n];
+            }
+
+            fft.run(&mut fft_input, &mut fft_output);
+
+            // Compute 8 frequency bands from 32 FFT bins (4 bins per band)
+            let mut spectrum = [0u8; 8];
+            for band in 0..8u8 {
+                let mut max_mag = 0.0f32;
+                for bin in (band as usize * 4)..((band as usize + 1) * 4) {
+                    let mag = if bin == 0 {
+                        // DC component (real only)
+                        fft_output[0].abs()
+                    } else if bin == 32 {
+                        // Nyquist (packed in output[1])
+                        fft_output[1].abs()
+                    } else {
+                        // Complex bin: real at output[2*bin], imag at output[2*bin+1]
+                        let re = fft_output[2 * bin];
+                        let im = fft_output[2 * bin + 1];
+                        sqrtf(re * re + im * im)
+                    };
+                    if mag > max_mag {
+                        max_mag = mag;
+                    }
+                }
+
+                let max_mag_scaled = max_mag * 0.0125;
+                // Convert to dB (logarithmic), map to 0-255
+                // 20*log10(mag) gives dB; use a floor of ~-100dB and ceiling of ~0dB
+                const MIN_DB: f32 = -100.0;
+                const MAX_DB: f32 = 0.0;
+                const DB_RANGE: f32 = MAX_DB - MIN_DB;
+                const DIVISOR: f32 = 255.0 / DB_RANGE;
+
+                let db = if max_mag_scaled > 0.0 {
+                    let db = 20.0 * libm::log10f(max_mag_scaled);
+                    db.clamp(MIN_DB, MAX_DB)
+                } else {
+                    MIN_DB
+                };
+                // Map -100dB..20dB to 0..255
+                let scaled = ((db - MIN_DB) * DIVISOR) as i32;
+                spectrum[band as usize] = scaled.clamp(0, 255) as u8;
+                defmt::debug!("FFT band {}: {} {} dB {}", band, max_mag, db, scaled);
+            }
+            spectrum_publisher.publish_immediate(spectrum);
+        }
+
         if left < (in_buffer.len() / 2) {
             let pos = in_buffer.len() - left;
             in_buffer.copy_within(pos.., 0);
@@ -229,34 +323,20 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
             mp3_buffer = &in_buffer[..];
         }
 
-        // now await the dma future. once the dma finishes, the next buffer needs to be queued
+        // now await the dma future. once the dma finishes, the next buffer needs to be q(music_level >> 16) as u8ueued
         // within DMA_DEPTH / SAMPLE_RATE = 960 / 11025 seconds = 87.1ms
         dma_future.await;
         mem::swap(&mut back_buffer, &mut front_buffer);
         front_sample_count = sample_count;
+        // let end_time = embassy_time::Instant::now();
+        // defmt::info!("Audio frame time: {} us", (end_time - start_time).as_micros());
     }
 }
 
-/// Input a value 0 to 255 to get a color value
-/// The colours are a transition r - g - b - back to r.
-fn wheel(mut wheel_pos: u8) -> RGB8 {
-    wheel_pos = 255 - wheel_pos;
-    if wheel_pos < 85 {
-        return (255 - wheel_pos * 3, 0, wheel_pos * 3).into();
-    }
-    if wheel_pos < 170 {
-        wheel_pos -= 85;
-        return (0, wheel_pos * 3, 255 - wheel_pos * 3).into();
-    }
-    wheel_pos -= 170;
-    (wheel_pos * 3, 255 - wheel_pos * 3, 0).into()
-}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
     let peripherals = embassy_rp::init(Default::default());
-
-    defmt::info!("Entry");
 
     let psram = {
         use embassy_rp::qmi_cs1::QmiCs1;
@@ -268,20 +348,12 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     if let Ok(psram) = psram {
-        defmt::info!("PSRAM initialized successfully, using PSRAM for heap");
-
         {
-            let (address, size) = unsafe {
+            unsafe {
                 let address = psram.base_address() as usize;
                 let size = psram.size() as usize;
                 HEAP.init(address, size);
-                (address, size)
-            };
-            defmt::info!(
-                "Heap initialized in PSRAM at {:08x}, size: {}",
-                address,
-                size
-            );
+            }
         }
     } else {
         defmt::warn!("Failed to initialize PSRAM, using internal RAM for heap");
@@ -290,17 +362,15 @@ async fn main(spawner: Spawner) -> ! {
         static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
 
         #[allow(static_mut_refs)]
-        let (address, size) = unsafe {
+        unsafe {
             let address = HEAP_MEM.as_ptr() as usize;
             HEAP.init(address, HEAP_SIZE);
-            (address, HEAP_SIZE)
-        };
-        defmt::info!("Heap initialized at addr: {:08x}, size: {}", address, size);
+        }
     }
 
     let mut pio1 = Pio::new(peripherals.PIO1, Irqs);
 
-    let mut data = [RGB8::default(); NUM_LEDS];
+    let mut led_colors = [RGB8::default(); NUM_LEDS];
 
     let program = PioWs2812Program::new(&mut pio1.common);
     let mut ws2812 = PioWs2812::new(
@@ -375,16 +445,59 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(unwrap!(audio_task(I2S.init(i2s))));
     spawner.spawn(unwrap!(heap_stats_task()));
 
-    let mut ticker = Ticker::every(Duration::from_millis(10));
-    let mut start_index = 0u8;
+    let mut ticker = Ticker::every(Duration::from_millis(50));
+
+    let mut spectrum_subscriber = SPECTRUM_CHANNEL.subscriber().unwrap();
+    let mut display_spectrum = [0.0f32; 8];
 
     loop {
-        for i in 0u8..(NUM_LEDS as u8) {
-            data[i as usize] = wheel(start_index.wrapping_add(i)) / 16;
+        // Take the latest spectrum data
+        let mut latest_spectrum = None;
+        while let Some(spectrum) = spectrum_subscriber.try_next_message_pure() {
+            latest_spectrum = Some(spectrum);
         }
-        ws2812.write(&data).await;
+
+        if let Some(spectrum) = latest_spectrum {
+            for col in 0..8 {
+                let new_val = spectrum[col] as f32 / 32.0; // Scale 0-255 to 0-8
+                // Fast attack, slow decay for smooth visualization
+                if new_val > display_spectrum[col] {
+                    display_spectrum[col] = new_val;
+                } else {
+                    display_spectrum[col] *= 0.7;
+                }
+            }
+        } else {
+            // Decay when no new data
+            for col in 0..8 {
+                display_spectrum[col] *= 0.7;
+            }
+        }
+
+        // Render spectrum to LED matrix
+        for col in 0..8usize {
+            let bar_height = display_spectrum[col] as usize;
+            let bar_height = bar_height.min(8);
+            // Frequency gradient: col 0 (low) = red, col 7 (high) = blue
+            let hue = (col as u8) * 25; // 0..175 across the wheel
+            let color = wheel(hue);
+
+            for row in 0..8usize {
+                let led_index = row * 8 + col;
+                if row >= (8 - bar_height) {
+                    led_colors[led_index] = RGB8 {
+                        r: color.r >> 4,
+                        g: color.g >> 4,
+                        b: color.b >> 4,
+                    };
+                } else {
+                    led_colors[led_index] = RGB8::default();
+                }
+            }
+        }
+
+        ws2812.write(&led_colors).await;
         ticker.next().await;
-        start_index = start_index.wrapping_add(1);
     }
 }
 

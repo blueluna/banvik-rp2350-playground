@@ -5,6 +5,7 @@ version = "0.1.0"
 authors = ["Erik Bånvik <erik.public@gmail.com>"]
 
 [dependencies]
+cmsis_dsp = { git = "https://github.com/samcrow/cmsis_dsp.rs", branch = "master" }
 cortex-m = { version = "0.7.7" }
 cortex-m-rt = "0.7.3"
 
