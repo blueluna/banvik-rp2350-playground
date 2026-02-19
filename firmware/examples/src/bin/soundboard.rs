@@ -23,7 +23,6 @@ const ALERT: &[u8] = include_bytes!("alert.mp3");
 const AAAAAHHHH: &[u8] = include_bytes!("aaaaahhhh.mp3");
 const HORN: &[u8] = include_bytes!("horn.mp3");
 
-
 use {defmt_rtt as _, panic_probe as _};
 
 #[global_allocator]
@@ -180,7 +179,7 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
                     in_buffer[..part].copy_from_slice(clip[..part].as_ref());
                     mp3_buffer = &in_buffer[..];
                 }
-             }
+            }
             _button_state = state;
         }
 
@@ -197,7 +196,14 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
                 nanomp3::Channels::Mono => "Mono",
                 nanomp3::Channels::Stereo => "Stereo",
             };
-            defmt::info!("Decoded MP3 frame: consumed {} produced {} samples, {}, {} Hz, {} kbps", consumed, info.samples_produced, channel, info.sample_rate, info.bitrate);
+            defmt::info!(
+                "Decoded MP3 frame: consumed {} produced {} samples, {}, {} Hz, {} kbps",
+                consumed,
+                info.samples_produced,
+                channel,
+                info.sample_rate,
+                info.bitrate
+            );
             match info.channels {
                 nanomp3::Channels::Mono => {
                     for n in 0..info.samples_produced {
@@ -242,8 +248,7 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
                 } else {
                     offset = end;
                 }
-            }
-            else {
+            } else {
                 in_buffer[left..].fill(0);
             }
             mp3_buffer = &in_buffer[..];

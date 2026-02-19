@@ -3,8 +3,8 @@
 
 extern crate alloc;
 
-use core::mem;
 use cmsis_dsp::transform::FloatRealFft;
+use core::mem;
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
@@ -52,7 +52,8 @@ const NUM_LEDS: usize = 64;
 
 static BUTTONS_CHANNEL: PubSubChannel<CriticalSectionRawMutex, u32, 4, 4, 1> = PubSubChannel::new();
 
-static SPECTRUM_CHANNEL: PubSubChannel<CriticalSectionRawMutex, [u8; 8], 4, 4, 1> = PubSubChannel::new();
+static SPECTRUM_CHANNEL: PubSubChannel<CriticalSectionRawMutex, [u8; 8], 4, 4, 1> =
+    PubSubChannel::new();
 
 /// Input value 0 to 255 to get a color value.
 /// Colors transition r -> g -> b -> back to r.
@@ -160,7 +161,8 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
     // Precompute Hann window
     let mut hann_window = [0f32; FFT_SIZE];
     for n in 0..FFT_SIZE {
-        hann_window[n] = 0.5 * (1.0 - cosf(2.0 * core::f32::consts::PI * n as f32 / FFT_SIZE as f32));
+        hann_window[n] =
+            0.5 * (1.0 - cosf(2.0 * core::f32::consts::PI * n as f32 / FFT_SIZE as f32));
     }
 
     i2s.start();
@@ -219,7 +221,15 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
         let left = mp3_buffer.len();
 
         let sample_count = if let Some(info) = info {
-            defmt::debug!("Decoded MP3 frame: consumed {} produced {} samples, channels {}, {} Hz, {} kbps offset {}", consumed, info.samples_produced, info.channels.num(), info.sample_rate, info.bitrate, offset);
+            defmt::debug!(
+                "Decoded MP3 frame: consumed {} produced {} samples, channels {}, {} Hz, {} kbps offset {}",
+                consumed,
+                info.samples_produced,
+                info.channels.num(),
+                info.sample_rate,
+                info.bitrate,
+                offset
+            );
             match info.channels {
                 nanomp3::Channels::Mono => {
                     for n in 0..info.samples_produced {
@@ -235,7 +245,8 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
                         let right = pcm_buffer[index | 1];
                         let left_sample = (left * volume) as i16;
                         let right_sample = (right * volume) as i16;
-                        back_buffer[n] = (left_sample as u16 as u32) | ((right_sample as u16 as u32) << 16);
+                        back_buffer[n] =
+                            (left_sample as u16 as u32) | ((right_sample as u16 as u32) << 16);
                     }
                     info.samples_produced
                 }
@@ -332,7 +343,6 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO0, 0>) -> ! {
         // defmt::info!("Audio frame time: {} us", (end_time - start_time).as_micros());
     }
 }
-
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {

@@ -8,6 +8,10 @@ Embedded Rust firmware for the RP2350 microcontroller (dual-core ARM Cortex-M85)
 
 ## Build & Run Commands
 
+Format the code with `cargo fmt`.
+
+Following describes how to run the examples.
+
 ```bash
 # Run any example (flashes via probe-rs automatically)
 cargo run --release --bin blinky
