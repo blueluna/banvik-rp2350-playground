@@ -1,0 +1,3 @@
+[workspace]
+members = ["mp3-protocol", "mp3-server"]
+resolver = "3"

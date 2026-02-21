@@ -37,7 +37,7 @@ fp-info-cache
 *.kicad_prl
 
 # Cargo build artifacts
-firmware/target/
+target/
 **/.idea
 
-firmware/music/
+music/

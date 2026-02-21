@@ -1,0 +1,17 @@
+[package]
+name = "mp3-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mp3-protocol = { path = "../mp3-protocol" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+heapless = { version = "0.9", features = ["serde"] }
+id3 = "1"
+crc32fast = "1"
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4"] }
+mp3lame-encoder = "0.2"
+tokio = { version = "1", features = ["full"] }
+mp4ameta = "0.13.0"

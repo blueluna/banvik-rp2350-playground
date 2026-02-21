@@ -28,12 +28,16 @@ embedded-storage = "0.3.1"
 
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt", "executor-interrupt"] }
 embassy-futures = { version = "0.1" }
-embassy-net = { version = "0.8", features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet", "dns", "proto-ipv4"] }
+embassy-net = { version = "0.8", features = ["defmt", "tcp", "udp", "icmp", "dhcpv4", "medium-ethernet", "dns", "proto-ipv4"] }
 embassy-rp = { version = "0.9", features = ["binary-info", "defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
 embassy-sync = { version = "0.7" }
 embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
 
-heapless = { version = "0.9" }
+heapless = { version = "0.9", features = ["serde"] }
+
+mp3-protocol = { path = "../../host/mp3-protocol" }
+postcard = { version = "1", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive"] }
 
 libm = "0.2.16"
 
