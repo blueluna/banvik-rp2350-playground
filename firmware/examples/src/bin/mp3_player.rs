@@ -9,7 +9,7 @@ use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{PIO0, PIO1};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0, PIO1};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
@@ -41,6 +41,7 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
     PIO1_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO1>;
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>, embassy_rp::dma::InterruptHandler<DMA_CH1>;
 });
 
 const BUTTON_1: u32 = 1 << 0;
@@ -387,6 +388,7 @@ async fn main(spawner: Spawner) -> ! {
         &mut pio1.common,
         pio1.sm1,
         peripherals.DMA_CH1,
+        Irqs,
         peripherals.PIN_31,
         &program,
     );
@@ -427,6 +429,7 @@ async fn main(spawner: Spawner) -> ! {
         &mut pio0.common,
         pio0.sm0,
         peripherals.DMA_CH0,
+        Irqs,
         data_pin,
         bit_clock_pin,
         left_right_clock_pin,

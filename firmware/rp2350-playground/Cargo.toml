@@ -6,3 +6,10 @@ authors = ["Erik Bånvik <erik.public@gmail.com>"]
 resolver = "3"
 
 [dependencies]
+bitflags = "2"
+defmt = {version = "1.0", optional = true}
+
+[features]
+default = []
+
+defmt = ["dep:defmt"]

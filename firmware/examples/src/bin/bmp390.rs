@@ -1,16 +1,21 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::pwm::Pwm;
 use embassy_time::{Duration, Ticker};
+use embedded_alloc::LlffHeap as Heap;
 use embedded_devices::devices::bosch::bmp390::{BMP390Async, address::Address};
 use embedded_devices::sensor::OneshotSensorAsync;
 use uom::si::pressure::hectopascal;
 use uom::si::thermodynamic_temperature::degree_celsius;
 
 use {defmt_rtt as _, panic_probe as _};
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 
 embassy_rp::bind_interrupts!(struct Irqs {
     I2C1_IRQ => embassy_rp::i2c::InterruptHandler<embassy_rp::peripherals::I2C1>;
@@ -32,6 +37,35 @@ async fn main(_spawner: Spawner) -> ! {
     let mut rp_configuration: embassy_rp::config::Config = Default::default();
     rp_configuration.clocks = embassy_rp::clocks::ClockConfig::crystal(12_000_000);
     let peripherals = embassy_rp::init(rp_configuration);
+
+    // ── PSRAM / Heap ──────────────────────────────────────────────────────
+    let psram = {
+        use embassy_rp::qmi_cs1::QmiCs1;
+        let psram_config = embassy_rp::psram::Config::aps6404l();
+        embassy_rp::psram::Psram::new(
+            QmiCs1::new(peripherals.QMI_CS1, peripherals.PIN_0),
+            psram_config,
+        )
+    };
+
+    if let Ok(psram) = psram {
+        unsafe {
+            let address = psram.base_address() as usize;
+            let size = psram.size() as usize;
+            HEAP.init(address, size);
+            defmt::info!("Heap in PSRAM at {:08x}, size: {}", address, size);
+        }
+    } else {
+        defmt::warn!("Failed to initialize PSRAM, using internal RAM for heap");
+        const HEAP_SIZE: usize = 65535;
+        static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
+
+        #[allow(static_mut_refs)]
+        unsafe {
+            let address = HEAP_MEM.as_ptr() as usize;
+            HEAP.init(address, HEAP_SIZE);
+        }
+    }
 
     let mut pwm_config: embassy_rp::pwm::Config = Default::default();
     pwm_config.top = 32_768;

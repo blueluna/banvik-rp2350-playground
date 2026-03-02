@@ -1,5 +1,6 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 runner = "probe-rs run --probe 2e8a:000c --always-print-stacktrace --no-location --catch-hardfault --chip RP235x"
+linker = "flip-link"
 
 [build]
 target = "thumbv8m.main-none-eabihf"
@@ -8,4 +9,5 @@ target = "thumbv8m.main-none-eabihf"
 DEFMT_LOG = "info"
 SSID = ""
 WIRELESS_PSK = ""
-MP3_SERVER = "10.0.0.30:9010"
+STREAM_HOST = "10.0.0.30"
+STREAM_PORT = "6564"

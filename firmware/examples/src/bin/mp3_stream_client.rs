@@ -11,23 +11,30 @@ use cyw43::aligned_bytes;
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER};
 use defmt::unwrap;
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_net::Stack;
 use embassy_net::tcp::TcpSocket;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{PIO0, PIO1, PIO2};
+use embassy_rp::peripherals::{
+    DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, DMA_CH4, PIO0, PIO1, PIO2, SPI0,
+};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::pwm::{Pwm, PwmOutput, SetDutyCycle};
+use embassy_rp::spi;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
-use embedded_io_async::{Read as _, Write as _};
+use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_io_async::{Read, Write as _};
+use esp_hal_mfrc522::MFRC522;
+use esp_hal_mfrc522::consts::UidSize;
 use libm::sqrtf;
-use mp3_protocol::{Request, Response, Status};
+use mp3_protocol::{Request, Response, Status, StreamChunk};
 use smart_leds::RGB8;
 
 use {defmt_rtt as _, panic_probe as _};
@@ -53,7 +60,8 @@ const BIT_DEPTH: u32 = 16;
 
 const WIFI_NETWORK: &str = env!("SSID");
 const WIFI_PASSWORD: &str = env!("WIRELESS_PSK");
-const MP3_SERVER: &str = env!("MP3_SERVER");
+const STREAM_HOST: &str = env!("STREAM_HOST");
+const STREAM_PORT: &str = env!("STREAM_PORT");
 
 #[unsafe(link_section = ".bi_entries")]
 #[used]
@@ -70,6 +78,11 @@ bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
     PIO1_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO1>;
     PIO2_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO2>;
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>,
+            embassy_rp::dma::InterruptHandler<DMA_CH1>,
+            embassy_rp::dma::InterruptHandler<DMA_CH2>,
+            embassy_rp::dma::InterruptHandler<DMA_CH3>,
+            embassy_rp::dma::InterruptHandler<DMA_CH4>;
 });
 
 const BUTTON_1: u32 = 1 << 0;
@@ -81,8 +94,10 @@ const NUM_LEDS: usize = 64;
 
 static BUTTONS_CHANNEL: PubSubChannel<CriticalSectionRawMutex, u32, 4, 4, 1> = PubSubChannel::new();
 
-static SPECTRUM_CHANNEL: PubSubChannel<CriticalSectionRawMutex, [u8; 8], 4, 4, 1> =
+static SPECTRUM_CHANNEL: PubSubChannel<CriticalSectionRawMutex, [u8; 8], 4, 1, 1> =
     PubSubChannel::new();
+
+static NFC_CHANNEL: PubSubChannel<CriticalSectionRawMutex, [u8; 8], 4, 1, 1> = PubSubChannel::new();
 
 struct AudioChunk {
     data: [u8; 4096],
@@ -107,8 +122,19 @@ impl AudioChunk {
     }
 }
 
+enum AudioOperation {
+    Chunk(AudioChunk),
+    NewStream,
+    StopStream,
+}
+
+enum StreamControl {
+    Play { hash: [u8; 32] },
+    Stop,
+}
+
 /// Pipe for streaming MP3 data from protocol_task to audio_task.
-static AUDIO_CHANNEL: Channel<CriticalSectionRawMutex, AudioChunk, 4> = Channel::new();
+static AUDIO_CHANNEL: Channel<CriticalSectionRawMutex, AudioOperation, 4> = Channel::new();
 
 fn wheel(mut wheel_pos: u8) -> RGB8 {
     wheel_pos = 255 - wheel_pos;
@@ -138,10 +164,7 @@ struct Controls<'a> {
 
 #[embassy_executor::task]
 async fn cyw43_task(
-    runner: cyw43::Runner<
-        'static,
-        cyw43::SpiBus<Output<'static>, PioSpi<'static, PIO0, 0, embassy_rp::peripherals::DMA_CH0>>,
-    >,
+    runner: cyw43::Runner<'static, cyw43::SpiBus<Output<'static>, PioSpi<'static, PIO0, 0>>>,
 ) -> ! {
     runner.run().await
 }
@@ -216,10 +239,11 @@ async fn write_message<T: serde::Serialize>(
     msg: &T,
 ) -> Result<(), embassy_net::tcp::Error> {
     let mut buf = [0u8; 8192];
-    let payload = postcard::to_slice(msg, &mut buf).unwrap();
-    let len = (payload.len() as u32).to_be_bytes();
-    socket.write_all(&len).await?;
-    socket.write_all(payload).await?;
+    let payload = postcard::to_slice(msg, &mut buf[4..]).unwrap();
+    let payload_len = payload.len();
+    let len = (payload_len as u32).to_be_bytes();
+    buf[..4].copy_from_slice(&len);
+    socket.write_all(&buf[..payload_len + 4]).await?;
     socket.flush().await?;
     Ok(())
 }
@@ -227,23 +251,28 @@ async fn write_message<T: serde::Serialize>(
 async fn read_message_into(
     socket: &mut TcpSocket<'_>,
     buf: &mut [u8],
-) -> Result<usize, embassy_net::tcp::Error> {
+) -> Result<usize, u32> {
     let mut len_buf = [0u8; 4];
     socket.read_exact(&mut len_buf).await.map_err(|e| match e {
-        embedded_io::ReadExactError::UnexpectedEof => embassy_net::tcp::Error::ConnectionReset,
-        embedded_io::ReadExactError::Other(e) => e,
+        embedded_io::ReadExactError::UnexpectedEof => 1u32,
+        embedded_io::ReadExactError::Other(_) => 1u32,
     })?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > buf.len() {
         defmt::error!("Message too large: {} > {}", len, buf.len());
-        return Err(embassy_net::tcp::Error::ConnectionReset);
+        // Attempt to clear the socket buffer
+        match socket.read(buf).await {
+            Ok(len) => defmt::warn!("Socket buffer cleared: {} bytes", len),
+            Err(_) => defmt::error!("Failed to clear socket buffer"),
+        }
+        return Err(2);
     }
     socket
         .read_exact(&mut buf[..len])
         .await
         .map_err(|e| match e {
-            embedded_io::ReadExactError::UnexpectedEof => embassy_net::tcp::Error::ConnectionReset,
-            embedded_io::ReadExactError::Other(e) => e,
+            embedded_io::ReadExactError::UnexpectedEof => 1u32,
+            embedded_io::ReadExactError::Other(_) => 1u32,
         })?;
     Ok(len)
 }
@@ -253,22 +282,27 @@ async fn read_message_into(
 #[embassy_executor::task]
 async fn protocol_task(net_stack: Stack<'static>) -> ! {
     // Parse server address
-    let (ip_str, port_str) = MP3_SERVER.rsplit_once(':').unwrap();
-    let ip = embassy_net::Ipv4Address::from_str(ip_str).unwrap();
-    let port: u16 = port_str.parse().unwrap();
+    let ip = embassy_net::Ipv4Address::from_str(STREAM_HOST).unwrap();
+    let port: u16 = STREAM_PORT.parse().unwrap();
     let remote = embassy_net::IpEndpoint::new(embassy_net::IpAddress::Ipv4(ip), port);
 
-    let mut rx_buf = [0u8; 8192];
-    let mut tx_buf = [0u8; 8192];
+    let mut rx_buf = [0u8; 1024];
+    let mut tx_buf = [0u8; 1024];
+    let mut msg_buf = [0u8; 1024];
 
-    // Buffer for receiving messages (needs to be large enough for Chunk responses)
-    // A Chunk response contains up to 4096 bytes of data + overhead
-    let mut msg_buf = [0u8; 8192];
+    // Buffers for the dedicated stream TCP socket
+    let mut stream_rx_buf = vec![0u8; 8192];
+    let mut stream_tx_buf = vec![0u8; 8192];
+    let mut stream_buf = vec![0u8; 8192];
+
+    let stream_remote = embassy_net::IpEndpoint::new(
+        embassy_net::IpAddress::Ipv4(ip),
+        port + 1,
+    );
 
     loop {
-        defmt::info!("Connecting to MP3 server at {}:{}", ip_str, port);
-
         let mut socket = TcpSocket::new(net_stack, &mut rx_buf, &mut tx_buf);
+        socket.set_keep_alive(Some(Duration::from_secs(10)));
         socket.set_timeout(Some(Duration::from_secs(30)));
 
         if let Err(e) = socket.connect(remote).await {
@@ -277,103 +311,216 @@ async fn protocol_task(net_stack: Stack<'static>) -> ! {
             continue;
         }
 
-        defmt::info!("Connected to server");
+        defmt::info!("Connected to {}:{} (control)", STREAM_HOST, STREAM_PORT);
 
-        if let Err(e) = run_session(&mut socket, &mut msg_buf).await {
+        let mut stream_socket = TcpSocket::new(net_stack, &mut stream_rx_buf, &mut stream_tx_buf);
+        stream_socket.set_keep_alive(Some(Duration::from_secs(10)));
+        stream_socket.set_timeout(Some(Duration::from_secs(30)));
+
+        if let Err(e) = stream_socket.connect(stream_remote).await {
+            defmt::warn!("Stream TCP connect failed: {:?}", e);
+            Timer::after_secs(2).await;
+            continue;
+        }
+
+        defmt::info!("Connected to {}:{} (stream)", STREAM_HOST, port + 1);
+
+        if let Err(e) = run_session(&mut socket, &mut stream_socket, &mut msg_buf, &mut stream_buf).await {
             defmt::warn!("Session error: {:?}", e);
         }
 
         defmt::info!("Disconnected, reconnecting...");
-        Timer::after_secs(1).await;
+        Timer::after_millis(500).await;
     }
 }
 
-async fn run_session(
+// ── Control task (NFC + control TCP → sends StreamControl to stream task) ────
+
+async fn control_task(
     socket: &mut TcpSocket<'_>,
     msg_buf: &mut [u8],
+    stream_ctrl: &Channel<CriticalSectionRawMutex, StreamControl, 4>,
 ) -> Result<(), embassy_net::tcp::Error> {
+    let mut nfc_subscriber = NFC_CHANNEL.subscriber().unwrap();
+    
     loop {
-        // List songs
-        defmt::info!("Requesting song list");
-        write_message(socket, &Request::List).await?;
-
-        let len = read_message_into(socket, msg_buf).await?;
-        let response: Response = postcard::from_bytes(&msg_buf[..len])
-            .map_err(|_| embassy_net::tcp::Error::ConnectionReset)?;
-
-        let songs = match response {
-            Response::SongList {
-                status: Status::Ok,
-                songs,
-            } => {
-                defmt::info!("Received song list with {} songs", songs.len());
-                for song in &songs {
-                    let title = core::str::from_utf8(&song.title).unwrap_or("<invalid utf-8>");
-                    defmt::info!("{=u32:08x} {}", song.hash, title);
+        match select(
+            nfc_subscriber.next_message(),
+            read_message_into(socket, msg_buf),
+        )
+        .await
+        {
+            Either::First(nfc_result) => match nfc_result {
+                embassy_sync::pubsub::WaitResult::Message(uid) => {
+                    defmt::info!("Query song from NFC {=[u8]:02x}", uid);
+                    write_message(
+                        socket,
+                        &Request::QueryUid {
+                            uid: u64::from_be_bytes(uid),
+                        },
+                    )
+                    .await?;
                 }
-                songs
-            }
-            _ => {
-                defmt::warn!("Unexpected response to List request");
-                return Err(embassy_net::tcp::Error::ConnectionReset);
-            }
-        };
+                embassy_sync::pubsub::WaitResult::Lagged(_) => {
+                    defmt::warn!("Lagged while waiting for NFC message, skipping");
+                }
+            },
 
-        if songs.is_empty() {
-            defmt::warn!("No songs available, retrying in 5s");
-            Timer::after_secs(5).await;
-            continue;
-        }
-
-        // Play each song in order
-        for song in songs.iter() {
-            let title = core::str::from_utf8(&song.title).unwrap_or("<invalid utf-8>");
-            defmt::info!("Playing song {} ({:08x})", title, song.hash);
-
-            write_message(socket, &Request::Play { hash: song.hash }).await?;
-
-            // Receive chunks until the song is complete
-            loop {
-                let len = read_message_into(socket, msg_buf).await?;
+            Either::Second(Ok(len)) => {
                 let response: Response = postcard::from_bytes(&msg_buf[..len])
                     .map_err(|_| embassy_net::tcp::Error::ConnectionReset)?;
 
                 match response {
-                    Response::Chunk {
-                        status: Status::Ok,
-                        chunk_index,
-                        total_chunks,
-                        data,
-                        ..
-                    } => {
-                        defmt::debug!("Received chunk {}/{}", chunk_index + 1, total_chunks);
-
-                        // Write MP3 data into the channel (blocks if channel is full)
-                        AUDIO_CHANNEL
-                            .send(AudioChunk::new(data.as_slice(), chunk_index))
-                            .await;
-
-                        if chunk_index + 1 >= total_chunks {
-                            break;
+                    Response::Play { status, hash, total_chunks: _ } => match status {
+                        Status::Ok => {
+                            stream_ctrl.send(StreamControl::Play { hash }).await;
+                        }
+                        _ => defmt::warn!("Failed to start stream, {}", status),
+                    },
+                    Response::Song { status, song } => {
+                        if status == Status::Ok {
+                            let title = core::str::from_utf8(&song.title)
+                                .unwrap_or("<invalid title>");
+                            defmt::info!("Found song {}, Playing", title);
+                            write_message(socket, &Request::PlayHash { hash: song.hash })
+                                .await?;
+                        } else {
+                            defmt::warn!("Failed to get song metadata, {}", status);
                         }
                     }
-                    Response::Chunk {
-                        status: Status::TitleNotFound,
-                        ..
-                    } => {
-                        defmt::warn!("Song not found, skipping");
-                        break;
+                    Response::SongList { status, songs } => {
+                        if status == Status::Ok {
+                            defmt::debug!("Received song list, {}", songs.len());
+                            for song in songs {
+                                let title = core::str::from_utf8(&song.title)
+                                    .unwrap_or("<invalid title>");
+                                defmt::info!(" - {}", title);
+                            }
+                        } else {
+                            defmt::warn!("Failed to get song list, {}", status);
+                        }
                     }
-                    _ => {
-                        defmt::warn!("Unexpected response during playback");
-                        break;
+                    Response::Stop { status } => {
+                        if status == Status::Ok {
+                            defmt::info!("Server stopped the stream");
+                            stream_ctrl.send(StreamControl::Stop).await;
+                        } else {
+                            defmt::warn!("Failed to stop stream, {}", status);
+                        }
                     }
+                }
+            }
+
+            Either::Second(Err(code)) => {
+                if code == 1 {
+                    defmt::warn!("Control connection closed by peer");
+                    return Err(embassy_net::tcp::Error::ConnectionReset);
+                }
+                // code 2: message too large — already warned in read_message_into, continue
+            }
+        }
+    }
+}
+
+// ── Stream task (stream TCP, drained by control messages between reads) ───────
+
+async fn stream_task(
+    socket: &mut TcpSocket<'_>,
+    stream_buf: &mut [u8],
+    stream_ctrl: &Channel<CriticalSectionRawMutex, StreamControl, 4>,
+) -> Result<(), embassy_net::tcp::Error> {
+    let mut current_song_hash = [0u8; 32];
+    let mut next_song_hash = [0u8; 32];
+    let mut flush_stream = false;
+    loop {
+        // Drain pending control signals before blocking on the next read so we
+        // never cancel a read_message_into call mid-message (which would
+        // desynchronise the length-prefix framing).
+        while let Ok(ctrl) = stream_ctrl.try_receive() {
+            match ctrl {
+                StreamControl::Play { hash } => {
+                    defmt::info!("Stream: new stream, {=[u8]:02x}", hash);
+                    if current_song_hash == hash {
+                        defmt::info!("Stream: already playing this song");
+                    } else if current_song_hash != [0u8; 32] {
+                        defmt::info!("Stream: switching to new song");
+                        AUDIO_CHANNEL.send(AudioOperation::NewStream).await;
+                        flush_stream = true;
+                    }
+                    next_song_hash = hash;
+                }
+                StreamControl::Stop => {
+                    defmt::info!("Stream: stopped by server");
+                    current_song_hash = [0u8; 32];
+                    AUDIO_CHANNEL.send(AudioOperation::StopStream).await;
                 }
             }
         }
 
-        // After playing all songs, loop back to listing
-        defmt::info!("All songs played, refreshing list");
+        match read_message_into(socket, stream_buf).await {
+            Ok(len) => match postcard::from_bytes::<StreamChunk>(&stream_buf[..len]) {
+                Ok(chunk) => {
+                    defmt::debug!(
+                        "TCP chunk {}/{}",
+                        chunk.chunk_index,
+                        chunk.total_chunks
+                    );
+                    if chunk.hash != current_song_hash {
+                        defmt::info!("Received chunk for new song {} / {}, switching stream", chunk.chunk_index, chunk.total_chunks);
+                        current_song_hash = chunk.hash;
+                    }
+                    if chunk.chunk_index == chunk.total_chunks - 1 {
+                        current_song_hash = [0u8; 32];
+                        defmt::info!("Received last chunk of the stream");
+                    }
+                    if flush_stream {
+                        if chunk.hash == next_song_hash {
+                            defmt::info!("Chunk belongs to the new song, unflushing");
+                            flush_stream = false;
+                        }
+                        else {
+                            defmt::info!("Flushing stream chunk (index {})", chunk.chunk_index);
+                        }
+                    }
+                    if flush_stream == false {
+                        AUDIO_CHANNEL
+                            .send(AudioOperation::Chunk(AudioChunk::new(
+                                chunk.data.as_slice(),
+                                chunk.chunk_index,
+                            )))
+                            .await;
+                    }
+                }
+                Err(_) => defmt::warn!("Failed to decode StreamChunk"),
+            },
+            Err(code) => {
+                if code == 1 {
+                    defmt::warn!("Stream connection closed by peer");
+                    return Err(embassy_net::tcp::Error::ConnectionReset);
+                }
+                // code 2: message too large — already warned, continue
+            }
+        }
+    }
+}
+
+// ── Session (runs control and stream tasks concurrently) ─────────────────────
+
+async fn run_session(
+    socket: &mut TcpSocket<'_>,
+    stream_socket: &mut TcpSocket<'_>,
+    msg_buf: &mut [u8],
+    stream_buf: &mut [u8],
+) -> Result<(), embassy_net::tcp::Error> {
+    let stream_ctrl = Channel::<CriticalSectionRawMutex, StreamControl, 4>::new();
+
+    match select(
+        control_task(socket, msg_buf, &stream_ctrl),
+        stream_task(stream_socket, stream_buf, &stream_ctrl),
+    )
+    .await
+    {
+        Either::First(result) | Either::Second(result) => result,
     }
 }
 
@@ -409,11 +556,11 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO1, 0>) -> ! {
 
     i2s.start();
 
-    const MULTIPLIER: f32 = 4095.0;
-    // let mut stream_buffer_a = vec![0u8; 32 * 1024];
-    // let mut stream_buffer_b = vec![0u8; 32 * 1024];
-    let mut stream_buffer_a = [0u8; 32 * 1024];
-    let mut stream_buffer_b = [0u8; 32 * 1024];
+    const MULTIPLIER: f32 = 1024.0;
+    let mut stream_buffer_a = vec![0u8; 32 * 1024];
+    let mut stream_buffer_b = vec![0u8; 32 * 1024];
+    // let mut stream_buffer_a = [0u8; 32 * 1024];
+    // let mut stream_buffer_b = [0u8; 32 * 1024];
     let mut current_stream = stream_buffer_a.as_mut_slice();
     let mut next_stream = stream_buffer_b.as_mut_slice();
     let mut song_change_pending = false; // Whether we've received a new song signal but haven't switched buffers yet
@@ -422,11 +569,11 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO1, 0>) -> ! {
     let mut mp3_offset = 0usize; // Current read position within in_buffer
     let mut front_sample_count = 0;
     let mut volume = MULTIPLIER;
-    let mut counter = 0u32;
-
-    let mut time_start = embassy_time::Instant::now();
+    let mut volume_effective = volume;
 
     loop {
+        let dma_future = i2s.write(&front_buffer[..front_sample_count]);
+
         let current_remaining = current_len - mp3_offset;
         // Refill in_buffer from pipe when running low
         let remaining = if song_change_pending {
@@ -442,29 +589,46 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO1, 0>) -> ! {
             current_len -= mp3_offset;
             mp3_offset = 0;
 
-            if let Ok(chunk) = AUDIO_CHANNEL.try_receive() {
-                if chunk.index == 0 {
-                    song_change_pending = true;
-                    next_len = 0;
-                }
-                let chunk_data = chunk.payload();
-                if song_change_pending {
-                    next_stream[next_len..next_len + chunk_data.len()].copy_from_slice(chunk_data);
-                    next_len += chunk_data.len();
-                    defmt::debug!(
-                        "Audio: Fill next {} bytes (chunk index {})",
-                        chunk.data_len,
-                        chunk.index
-                    );
-                } else {
-                    current_stream[current_len..current_len + chunk_data.len()]
-                        .copy_from_slice(chunk_data);
-                    current_len += chunk_data.len();
-                    defmt::debug!(
-                        "Audio: Fill current {} bytes (chunk index {})",
-                        chunk.data_len,
-                        chunk.index
-                    );
+            if let Ok(operation) = AUDIO_CHANNEL.try_receive() {
+                match operation {
+                    AudioOperation::Chunk(chunk) => {
+                        if chunk.index == 0 {
+                            song_change_pending = true;
+                            next_len = 0;
+                        }
+                        let chunk_data = chunk.payload();
+                        if song_change_pending {
+                            next_stream[next_len..next_len + chunk_data.len()]
+                                .copy_from_slice(chunk_data);
+                            next_len += chunk_data.len();
+                            defmt::info!(
+                                "Audio: Fill next {} bytes (chunk index {})",
+                                chunk.data_len,
+                                chunk.index
+                            );
+                        } else {
+                            current_stream[current_len..current_len + chunk_data.len()]
+                                .copy_from_slice(chunk_data);
+                            current_len += chunk_data.len();
+                            defmt::debug!(
+                                "Audio: Fill current {} bytes (chunk index {})",
+                                chunk.data_len,
+                                chunk.index
+                            );
+                        }
+                    }
+                    AudioOperation::NewStream => {
+                        defmt::info!("Audio: New stream incoming, {} bytes, {} bytes", current_len, mp3_offset);
+                        current_len = 0;
+                        mp3_offset = 0;
+                    }
+                    AudioOperation::StopStream => {
+                        defmt::info!("Audio: Stream stopped");
+                        current_len = 0;
+                        next_len = 0;
+                        mp3_offset = 0;
+                        song_change_pending = false;
+                    }
                 }
             }
         }
@@ -481,41 +645,43 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO1, 0>) -> ! {
 
         if current_len == 0 {
             // Still no data, output silence
-            front_buffer[..BUFFER_SIZE].fill(0);
-            let dma_future = i2s.write(&front_buffer[..BUFFER_SIZE]);
+            back_buffer[..BUFFER_SIZE].fill(0);
+            front_sample_count = BUFFER_SIZE;
             dma_future.await;
             continue;
         }
 
-        let dma_future = i2s.write(&front_buffer[..front_sample_count]);
-
         // Volume control from buttons
         while let Some(state) = buttons_subscriber.try_next_message_pure() {
             if (state & BUTTON_1) == BUTTON_1 {
-                if volume == 0.0 {
-                    volume = MULTIPLIER;
+                if volume_effective == 0.0 {
+                    volume_effective = volume;
                 } else {
-                    volume = 0.0;
+                    volume_effective = 0.0;
                 }
             }
             if (state & BUTTON_2) == BUTTON_2 {
-                if volume == 0.0 {
-                    volume = MULTIPLIER;
+                if volume_effective == 0.0 {
+                    volume_effective = volume;
                 } else {
                     volume = volume * 0.5;
+                    volume_effective = volume;
                 }
             }
             if (state & BUTTON_3) == BUTTON_3 {
-                if volume == 0.0 {
-                    volume = MULTIPLIER;
+                if volume_effective == 0.0 {
+                    volume_effective = volume;
                 } else {
                     volume = volume * 2.0;
+                    volume_effective = volume;
                 }
             }
         }
 
-        let mp3_slice = &current_stream[mp3_offset..current_len];
-        let (consumed, info) = decoder.decode(mp3_slice, &mut pcm_buffer);
+        let (consumed, info) = decoder.decode(
+            &current_stream[mp3_offset..current_len],
+            &mut pcm_buffer[0..],
+        );
         mp3_offset += consumed;
 
         let sample_count = if let Some(info) = info {
@@ -530,7 +696,7 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO1, 0>) -> ! {
             match info.channels {
                 nanomp3::Channels::Mono => {
                     for n in 0..info.samples_produced {
-                        let s = (pcm_buffer[n] * volume) as i16;
+                        let s = (pcm_buffer[n] * volume_effective) as i16;
                         back_buffer[n] = (s as u16 as u32) | ((s as u16 as u32) << 16);
                     }
                     info.samples_produced
@@ -540,8 +706,8 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO1, 0>) -> ! {
                         let index = n << 1;
                         let left = pcm_buffer[index];
                         let right = pcm_buffer[index | 1];
-                        let left_sample = (left * volume) as i16;
-                        let right_sample = (right * volume) as i16;
+                        let left_sample = (left * volume_effective) as i16;
+                        let right_sample = (right * volume_effective) as i16;
                         back_buffer[n] =
                             (left_sample as u16 as u32) | ((right_sample as u16 as u32) << 16);
                     }
@@ -603,15 +769,9 @@ async fn audio_task(i2s: &'static mut PioI2sOut<'static, PIO1, 0>) -> ! {
             spectrum_publisher.publish_immediate(spectrum);
         }
 
-        let timer_end = embassy_time::Instant::now();
-        let decode_time = timer_end - time_start;
-        defmt::debug!("MP3 frame decoded in {}", decode_time.as_micros());
         dma_future.await;
-        time_start = embassy_time::Instant::now();
-        defmt::debug!("DMA transfer of {} samples took {} micros", front_sample_count, (time_start - timer_end).as_micros());
         mem::swap(&mut back_buffer, &mut front_buffer);
         front_sample_count = sample_count;
-        counter = counter.wrapping_add(1);
     }
 }
 
@@ -643,10 +803,10 @@ async fn heap_stats_task() {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
-    let peripherals = embassy_rp::init(Default::default());
+    let mut rp_configuration: embassy_rp::config::Config = Default::default();
+    rp_configuration.clocks = embassy_rp::clocks::ClockConfig::crystal(12_000_000);
+    let peripherals = embassy_rp::init(rp_configuration);
     let mut rng = embassy_rp::clocks::RoscRng;
-
-    defmt::info!("MP3 Stream Client starting");
 
     // ── PSRAM / Heap ──────────────────────────────────────────────────────
     let psram = {
@@ -688,6 +848,7 @@ async fn main(spawner: Spawner) -> ! {
         &mut pio1.common,
         pio1.sm0,
         peripherals.DMA_CH1,
+        Irqs,
         peripherals.PIN_20,
         peripherals.PIN_21,
         peripherals.PIN_22,
@@ -707,6 +868,7 @@ async fn main(spawner: Spawner) -> ! {
         &mut pio2.common,
         pio2.sm0,
         peripherals.DMA_CH2,
+        Irqs,
         peripherals.PIN_31,
         &ws2812_program,
     );
@@ -734,10 +896,45 @@ async fn main(spawner: Spawner) -> ! {
     );
     let (pwm_4, pwm_3) = pwm_4_3.split();
 
+    // ── NFC ─────────────────────────────────────────────
+
+    // MFRC522 reset pin
+    let mut mfrc522_reset = Output::new(peripherals.PIN_6, Level::Low);
+
+    // SPI configuration for MFRC522 (SPI Mode 0: CPOL=0, CPHA=0)
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = 1_000_000; // 1 MHz
+    spi_config.polarity = spi::Polarity::IdleLow;
+    spi_config.phase = spi::Phase::CaptureOnFirstTransition;
+
+    // SPI0 with DMA for async support
+    let spi_bus = spi::Spi::new(
+        peripherals.SPI0,
+        peripherals.PIN_2, // SCK
+        peripherals.PIN_3, // MOSI (TX)
+        peripherals.PIN_4, // MISO (RX)
+        peripherals.DMA_CH3,
+        peripherals.DMA_CH4,
+        Irqs,
+        spi_config,
+    );
+
+    let cs = Output::new(peripherals.PIN_1, Level::High);
+
+    let spi_device = ExclusiveDevice::new_no_delay(spi_bus, cs).unwrap();
+    let driver = esp_hal_mfrc522::drivers::SpiDriver::new(spi_device);
+    let mfrc522 = MFRC522::new(driver);
+
+    // Hardware reset
+    Timer::after_millis(10).await;
+    mfrc522_reset.set_high();
+    Timer::after_millis(50).await;
+
     // ── WiFi (CYW43 on PIO0) ─────────────────────────────────────────────
     let clm = aligned_bytes!("../../../firmware/43439A0_clm.bin");
     let nvram = aligned_bytes!("../../../firmware/nvram_rp2040.bin");
     let fw = aligned_bytes!("../../../firmware/43439A0.bin");
+
 
     static CYW43_STATE: static_cell::StaticCell<cyw43::State> = static_cell::StaticCell::new();
     let state = CYW43_STATE.init(cyw43::State::new());
@@ -753,7 +950,7 @@ async fn main(spawner: Spawner) -> ! {
         cs,
         peripherals.PIN_24,
         peripherals.PIN_29,
-        peripherals.DMA_CH0,
+        embassy_rp::dma::Channel::new(peripherals.DMA_CH0, Irqs),
     );
 
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw, nvram).await;
@@ -776,6 +973,16 @@ async fn main(spawner: Spawner) -> ! {
         NET_RESOURCES.init(embassy_net::StackResources::new()),
         seed,
     );
+    spawner.spawn(unwrap!(buttons_task(CONTROL.init(Controls {
+        button_1: Input::new(peripherals.PIN_39, Pull::Up),
+        button_2: Input::new(peripherals.PIN_38, Pull::Up),
+        button_3: Input::new(peripherals.PIN_37, Pull::Up),
+        button_4: Input::new(peripherals.PIN_36, Pull::Up),
+        led_1: pwm_1.unwrap(),
+        led_2: pwm_2.unwrap(),
+        led_3: pwm_3.unwrap(),
+        led_4: pwm_4.unwrap(),
+    }))));
 
     spawner.spawn(unwrap!(net_task(net_runner)));
 
@@ -793,7 +1000,6 @@ async fn main(spawner: Spawner) -> ! {
     defmt::info!("WiFi joined");
 
     net_stack.wait_link_up().await;
-    defmt::info!("Link up, waiting for DHCP...");
     net_stack.wait_config_up().await;
 
     if let Some(ipv4_config) = net_stack.config_v4() {
@@ -804,21 +1010,23 @@ async fn main(spawner: Spawner) -> ! {
     Timer::after_millis(10).await;
     audio_shutdown.set_high();
 
+    static NFC_DEVICE: static_cell::StaticCell<
+        MFRC522<
+            esp_hal_mfrc522::drivers::SpiDriver<
+                ExclusiveDevice<
+                    spi::Spi<'_, SPI0, spi::Async>,
+                    Output<'_>,
+                    embedded_hal_bus::spi::NoDelay,
+                >,
+            >,
+        >,
+    > = static_cell::StaticCell::new();
     // ── Spawn tasks ───────────────────────────────────────────────────────
-    spawner.spawn(unwrap!(buttons_task(CONTROL.init(Controls {
-        button_1: Input::new(peripherals.PIN_39, Pull::Up),
-        button_2: Input::new(peripherals.PIN_38, Pull::Up),
-        button_3: Input::new(peripherals.PIN_37, Pull::Up),
-        button_4: Input::new(peripherals.PIN_36, Pull::Up),
-        led_1: pwm_1.unwrap(),
-        led_2: pwm_2.unwrap(),
-        led_3: pwm_3.unwrap(),
-        led_4: pwm_4.unwrap(),
-    }))));
 
     spawner.spawn(unwrap!(audio_task(I2S.init(i2s))));
     spawner.spawn(unwrap!(protocol_task(net_stack)));
     spawner.spawn(unwrap!(heap_stats_task()));
+    spawner.spawn(unwrap!(nfc_task(NFC_DEVICE.init(mfrc522))));
 
     // ── LED visualization loop (main task) ────────────────────────────────
     let mut led_colors = [RGB8::default(); NUM_LEDS];
@@ -870,5 +1078,84 @@ async fn main(spawner: Spawner) -> ! {
         }
         ws2812.write(&led_colors).await;
         ticker.next().await;
+    }
+}
+
+#[embassy_executor::task]
+async fn nfc_task(
+    nfc: &'static mut MFRC522<
+        esp_hal_mfrc522::drivers::SpiDriver<
+            ExclusiveDevice<
+                spi::Spi<'static, SPI0, spi::Async>,
+                Output<'static>,
+                embedded_hal_bus::spi::NoDelay,
+            >,
+        >,
+    >,
+) -> ! {
+    let nfc_publisher = NFC_CHANNEL.publisher().unwrap();
+
+    // Initialize MFRC522
+    match nfc.pcd_init().await {
+        Ok(()) => defmt::info!("MFRC522 initialized successfully"),
+        Err(_e) => {
+            defmt::error!("Failed to initialize MFRC522");
+            loop {
+                Timer::after_millis(1000).await;
+            }
+        }
+    }
+
+    match nfc.pcd_get_version().await {
+        Ok(version) => defmt::info!("MFRC522 firmware version: {}", version as u8),
+        Err(_e) => defmt::error!("Failed to get MFRC522 version"),
+    }
+
+    match nfc.pcd_set_antenna_gain(0xff).await {
+        Ok(()) => defmt::info!("Antenna gain set to max"),
+        Err(_e) => defmt::error!("Failed to set antenna gain"),
+    }
+
+    defmt::info!("Scanning for NFC cards...");
+
+    loop {
+        // Check for new card
+        if nfc.picc_is_new_card_present().await.is_err() {
+            continue;
+        }
+
+        // Read card UID
+        let uid = match nfc.get_card(UidSize::Four).await {
+            Ok(uid) => uid,
+            Err(_) => match nfc.get_card(UidSize::Seven).await {
+                Ok(uid) => uid,
+                Err(_) => continue,
+            },
+        };
+
+        let uid_len = uid.size as usize;
+        let uid_bytes = &uid.uid_bytes[..uid_len];
+
+        let target_type = rp2350_playground::nfc::TargetType::from_response(uid.sak, uid.size);
+        defmt::info!(
+            "Found card with UID: {=[u8]:02x} SAK: {=u8:02x} {}",
+            uid_bytes,
+            uid.sak,
+            target_type
+        );
+
+        if uid_len == 7 {
+            // NTAG / Ultralight - NFC Forum Type 2 Tag
+            let mut uid = [0u8; 8];
+            uid[1..8].copy_from_slice(uid_bytes);
+            defmt::info!("NFC: Use {=[u8]:02x}", uid);
+            nfc_publisher.publish_immediate(uid);
+            Timer::after_millis(500).await;
+        } else if uid_len == 4 {
+            // MIFARE Classic - authenticate and read sectors
+        }
+
+        let _ = nfc.picc_halta().await;
+        let _ = nfc.pcd_stop_crypto1().await;
     }
 }

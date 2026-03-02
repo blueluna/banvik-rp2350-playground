@@ -33,6 +33,12 @@ probe-rs download --probe 2e8a:000c examples/src/bin/<file>.mp3 \
 
 The `.cargo/config.toml` runner automatically uses `probe-rs` with probe ID `2e8a:000c` and target `thumbv8m.main-none-eabihf`.
 
+```bash
+# Run tests for the rp2350-playground library crate (must specify host target
+# since .cargo/config.toml defaults to thumbv8m.main-none-eabihf)
+cargo test -p rp2350-playground --target x86_64-unknown-linux-gnu
+```
+
 ## Hardware
 
 **Pinout (from examples):**

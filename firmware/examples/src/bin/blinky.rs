@@ -5,14 +5,18 @@ use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Pull};
-use embassy_rp::peripherals::PIO1;
+use embassy_rp::peripherals::{DMA_CH1, PIO1};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::pwm::{Pwm, PwmOutput, SetDutyCycle};
 use embassy_time::{Duration, Ticker};
+use embedded_alloc::LlffHeap as Heap;
 use smart_leds::RGB8;
 
 use {defmt_rtt as _, panic_probe as _};
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 
 #[unsafe(link_section = ".bi_entries")]
 #[used]
@@ -27,6 +31,7 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
 
 bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO1>;
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH1>;
 });
 
 struct Controls<'a> {
@@ -122,6 +127,7 @@ async fn main(spawner: Spawner) -> ! {
         &mut pio1.common,
         pio1.sm1,
         peripherals.DMA_CH1,
+        Irqs,
         peripherals.PIN_31,
         &program,
     );

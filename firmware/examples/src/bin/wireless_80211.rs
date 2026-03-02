@@ -10,7 +10,7 @@ use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::PIO0;
+use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::pio::Pio;
 use embassy_time::{Duration, Ticker};
 use embedded_alloc::LlffHeap as Heap;
@@ -34,13 +34,14 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>;
 });
 
 #[embassy_executor::task]
 async fn cyw43_task(
     runner: cyw43::Runner<
         'static,
-        cyw43::SpiBus<Output<'static>, PioSpi<'static, PIO0, 0, embassy_rp::peripherals::DMA_CH0>>,
+        cyw43::SpiBus<Output<'static>, PioSpi<'static, PIO0, 0>>,
     >,
 ) -> ! {
     runner.run().await
@@ -124,7 +125,7 @@ async fn main(spawner: Spawner) -> ! {
         cs,
         peripherals.PIN_24,
         peripherals.PIN_29,
-        peripherals.DMA_CH0,
+        embassy_rp::dma::Channel::new(peripherals.DMA_CH0, Irqs),
     );
 
     defmt::info!("CYW43 Construction");

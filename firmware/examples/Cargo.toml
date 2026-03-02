@@ -18,10 +18,10 @@ defmt-rtt = "1.1"
 efmt = { git = "https://github.com/dragonnn/efmt.git", branch = "main" , features = ["heapless09"] }
 
 embedded-alloc = "0.7"
-embedded-devices = { version = "0.10.3", features = ["bosch-bmp390", "texas_instruments-tmp117"] }
+embedded-devices = { version = "0.10.3", default-features = false, features = ["async", "bosch-bmp390", "texas_instruments-tmp117"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-embedded-hal-bus = "0.3.0"
+embedded-hal-bus = { version = "0.3.0", features = ["async"] }
 embedded-io = "0.7"
 embedded-io-async = "0.7"
 embedded-storage = "0.3.1"
@@ -35,14 +35,20 @@ embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"]
 
 heapless = { version = "0.9", features = ["serde"] }
 
-mp3-protocol = { path = "../../host/mp3-protocol" }
+mp3-protocol = { path = "../../host/mp3-protocol", features = ["defmt"] }
 postcard = { version = "1", default-features = false }
+esp-hal-mfrc522 = { git = "https://github.com/filipton/esp-hal-mfrc522.git", features = ["embassy-time"] }
+pn532 = { version = "0.5.0", git = "https://github.com/blueluna/wmt-pn532.git", branch = "master" , default-features = false, features = ["msb-spi"]}
+rnfc = { path = "../rnfc/rnfc", features = ["defmt"] }
+rnfc-st25r39 = { path = "../rnfc/rnfc-st25r39", features = ["defmt"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 
 libm = "0.2.16"
 
 nanomp3 = "0.1.1"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
+
+rp2350-playground = { path = "../rp2350-playground", features = ["defmt"] }
 
 smart-leds = "0.4.0"
 static_cell = "2.1"

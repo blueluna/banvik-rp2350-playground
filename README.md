@@ -133,8 +133,8 @@ Not necessarily for ADC input.
  - [X] I2C / Qwiic / Stemma 1
  - [X] I2C / Qwiic / Stemma 2
  - [ ] ADC input
- - [ ] GPIO header
- - [ ] SPI
+ - [X] GPIO header
+ - [X] SPI
  - [ ] USB
 
 ## Rust firmware
