@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use alloc::vec;
+use alloc::{format, string::String, string::ToString};
 use cmsis_dsp::transform::FloatRealFft;
 use core::mem;
 use core::str::FromStr;
@@ -17,7 +18,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{
-    DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, DMA_CH4, PIO0, PIO1, PIO2, SPI0,
+    DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, DMA_CH4, DMA_CH5, DMA_CH6, PIO0, PIO1, PIO2, SPI0,
 };
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::i2s::{PioI2sOut, PioI2sOutProgram};
@@ -30,6 +31,9 @@ use embassy_sync::pubsub::PubSubChannel;
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
 use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_sdmmc::{
+    Directory, LfnBuffer, ShortFileName, TimeSource, Timestamp, VolumeIdx, VolumeManager,
+};
 use embedded_io_async::{Read, Write as _};
 use esp_hal_mfrc522::MFRC522;
 use esp_hal_mfrc522::consts::UidSize;
@@ -82,7 +86,9 @@ bind_interrupts!(struct Irqs {
             embassy_rp::dma::InterruptHandler<DMA_CH1>,
             embassy_rp::dma::InterruptHandler<DMA_CH2>,
             embassy_rp::dma::InterruptHandler<DMA_CH3>,
-            embassy_rp::dma::InterruptHandler<DMA_CH4>;
+            embassy_rp::dma::InterruptHandler<DMA_CH4>,
+            embassy_rp::dma::InterruptHandler<DMA_CH5>,
+            embassy_rp::dma::InterruptHandler<DMA_CH6>;
 });
 
 const BUTTON_1: u32 = 1 << 0;
@@ -158,6 +164,143 @@ struct Controls<'a> {
     led_2: PwmOutput<'a>,
     led_3: PwmOutput<'a>,
     led_4: PwmOutput<'a>,
+}
+
+struct SdCardTimeSource;
+
+impl TimeSource for SdCardTimeSource {
+    fn get_timestamp(&self) -> Timestamp {
+        Timestamp {
+            year_since_1970: 56,
+            zero_indexed_month: 0,
+            zero_indexed_day: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+        }
+    }
+}
+
+struct SdDirEntry {
+    short_name: ShortFileName,
+    long_name: Option<String>,
+    is_dir: bool,
+    size: u32,
+}
+
+fn sd_scan_recursive<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    dir: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    current_path: &str,
+) -> Result<(), embedded_sdmmc::Error<<D as embedded_sdmmc::BlockDevice>::Error>>
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: embedded_sdmmc::TimeSource,
+    <D as embedded_sdmmc::BlockDevice>::Error: core::fmt::Debug,
+{
+    let mut entries: alloc::vec::Vec<SdDirEntry> = alloc::vec::Vec::new();
+    let mut lfn_storage = [0u8; 260];
+    let mut lfn_buffer = LfnBuffer::new(&mut lfn_storage);
+
+    dir.iterate_dir_lfn(&mut lfn_buffer, |entry, lfn_name| {
+        entries.push(SdDirEntry {
+            short_name: entry.name.clone(),
+            long_name: lfn_name.map(|name| name.to_string()),
+            is_dir: entry.attributes.is_directory(),
+            size: entry.size,
+        });
+    })?;
+
+    for entry in entries {
+        if entry.short_name == ShortFileName::this_dir() || entry.short_name == ShortFileName::parent_dir() {
+            continue;
+        }
+
+        let display_name = match entry.long_name {
+            Some(name) => name,
+            None => format!("{}", entry.short_name),
+        };
+
+        let full_path = if current_path == "/" {
+            format!("/{}", display_name)
+        } else {
+            format!("{}/{}", current_path, display_name)
+        };
+
+        if entry.is_dir {
+            defmt::info!("SD DIR  {}", full_path.as_str());
+            match dir.open_dir(&entry.short_name) {
+                Ok(subdir) => {
+                    if let Err(e) = sd_scan_recursive(&subdir, full_path.as_str()) {
+                        defmt::warn!(
+                            "SD recurse failed on {}: {}",
+                            full_path.as_str(),
+                            defmt::Debug2Format(&e)
+                        );
+                    }
+                }
+                Err(e) => {
+                    defmt::warn!(
+                        "SD open dir failed on {}: {}",
+                        full_path.as_str(),
+                        defmt::Debug2Format(&e)
+                    );
+                }
+            }
+        } else {
+            defmt::info!("SD FILE {} ({} bytes)", full_path.as_str(), entry.size);
+        }
+    }
+
+    Ok(())
+}
+
+fn scan_sd_card<SPI>(spi_device: SPI)
+where
+    SPI: embedded_hal::spi::SpiDevice,
+    <SPI as embedded_hal::spi::ErrorType>::Error: core::fmt::Debug,
+{
+    let delay = embassy_time::Delay;
+    let sd_card = embedded_sdmmc::SdCard::new(spi_device, delay);
+
+    let card_size = match sd_card.num_bytes() {
+        Ok(size) => size,
+        Err(e) => {
+            defmt::warn!("SD card init failed: {}", defmt::Debug2Format(&e));
+            return;
+        }
+    };
+
+    defmt::info!("SD card ready: {} bytes", card_size);
+
+    let volume_mgr = VolumeManager::new(sd_card, SdCardTimeSource);
+    let volume = match volume_mgr.open_volume(VolumeIdx(0)) {
+        Ok(volume) => volume,
+        Err(e) => {
+            defmt::warn!("SD open volume 0 failed: {}", defmt::Debug2Format(&e));
+            return;
+        }
+    };
+
+    let root_dir = match volume.open_root_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            defmt::warn!("SD open root dir failed: {}", defmt::Debug2Format(&e));
+            return;
+        }
+    };
+
+    defmt::info!("SD scan start");
+    if let Err(e) = sd_scan_recursive(&root_dir, "/") {
+        defmt::warn!("SD scan failed: {}", defmt::Debug2Format(&e));
+    } else {
+        defmt::info!("SD scan complete");
+    }
 }
 
 // ── WiFi / Network tasks ────────────────────────────────────────────────────
@@ -304,6 +447,8 @@ async fn protocol_task(net_stack: Stack<'static>) -> ! {
         let mut socket = TcpSocket::new(net_stack, &mut rx_buf, &mut tx_buf);
         socket.set_keep_alive(Some(Duration::from_secs(10)));
         socket.set_timeout(Some(Duration::from_secs(30)));
+
+        defmt::info!("Connecting to {}:{}...", STREAM_HOST, STREAM_PORT);
 
         if let Err(e) = socket.connect(remote).await {
             defmt::warn!("TCP connect failed: {:?}", e);
@@ -900,6 +1045,8 @@ async fn main(spawner: Spawner) -> ! {
 
     // MFRC522 reset pin
     let mut mfrc522_reset = Output::new(peripherals.PIN_6, Level::Low);
+    // MFRC522 irq pin
+    let mut _mfrc522_irq = Input::new(peripherals.PIN_5, Pull::Up);
 
     // SPI configuration for MFRC522 (SPI Mode 0: CPOL=0, CPHA=0)
     let mut spi_config = spi::Config::default();
@@ -924,6 +1071,26 @@ async fn main(spawner: Spawner) -> ! {
     let spi_device = ExclusiveDevice::new_no_delay(spi_bus, cs).unwrap();
     let driver = esp_hal_mfrc522::drivers::SpiDriver::new(spi_device);
     let mfrc522 = MFRC522::new(driver);
+
+    // SPI configuration for microSD
+    let mut spi_1_config = spi::Config::default();
+    spi_1_config.frequency = 1_000_000; // 1 MHz
+    spi_1_config.polarity = spi::Polarity::IdleLow;
+    spi_1_config.phase = spi::Phase::CaptureOnFirstTransition;
+
+    // SPI1 in blocking mode for embedded-sdmmc
+    let spi_1_bus = spi::Spi::new_blocking(
+        peripherals.SPI1,
+        peripherals.PIN_10, // SCK
+        peripherals.PIN_11, // MOSI (TX)
+        peripherals.PIN_8, // MISO (RX)
+        spi_1_config,
+    );
+
+    let cs_1 = Output::new(peripherals.PIN_9, Level::High);
+
+    let spi_1_device = ExclusiveDevice::new_no_delay(spi_1_bus, cs_1).unwrap();
+    scan_sd_card(spi_1_device);
 
     // Hardware reset
     Timer::after_millis(10).await;
@@ -957,9 +1124,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(unwrap!(cyw43_task(runner)));
 
     control.init(clm).await;
-    control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
-        .await;
+    // Some firmware/chip revisions return IOCTL status -5 for SetPm/PM iovars.
+    // CYW43 currently panics on any IOCTL error, so skip PM configuration to
+    // keep the stream client running and allow reconnect logic to recover.
 
     // ── Network stack ─────────────────────────────────────────────────────
     let config = embassy_net::Config::dhcpv4(Default::default());
@@ -987,15 +1154,30 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(unwrap!(net_task(net_runner)));
 
     // ── WiFi connect ──────────────────────────────────────────────────────
-    defmt::info!("Joining WiFi network");
-    while let Err(err) = control
-        .join(
-            WIFI_NETWORK,
-            cyw43::JoinOptions::new(WIFI_PASSWORD.as_bytes()),
-        )
-        .await
-    {
-        defmt::info!("WiFi join failed: {:?}", err);
+    defmt::info!("Joining WiFi network {} {}", WIFI_NETWORK, WIFI_PASSWORD);
+    loop {
+        match control
+            .join(
+                WIFI_NETWORK,
+                cyw43::JoinOptions::new(WIFI_PASSWORD.as_bytes()),
+            )
+            .await
+        {
+            Ok(()) => break,
+            Err(cyw43::JoinError::AuthenticationFailure) => {
+                defmt::error!("WiFi join failed: AuthenticationFailure");
+                // Avoid hammering join retries after auth failures. On some
+                // CYW43 firmware/chip combinations this can trigger an
+                // internal IOCTL panic (-5) in the driver task.
+                loop {
+                    Timer::after_secs(60).await;
+                }
+            }
+            Err(err) => {
+                defmt::warn!("WiFi join failed: {:?}, retrying", err);
+                Timer::after_secs(2).await;
+            }
+        }
     }
     defmt::info!("WiFi joined");
 

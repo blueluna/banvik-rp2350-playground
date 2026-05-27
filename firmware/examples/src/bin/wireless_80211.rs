@@ -161,7 +161,9 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(unwrap!(net_task(runner)));
 
-    let _wireless_hw_address = net_stack.hardware_address();
+    let wireless_hw_address = net_stack.hardware_address();
+
+    defmt::info!("Join Wi-Fi network {}, {}", WIFI_NETWORK, wireless_hw_address);
 
     while let Err(err) = control
         .join(
@@ -186,6 +188,11 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     let mut ticker = Ticker::every(Duration::from_secs(10));
+
+
+    defmt::info!("Leave Wi-Fi network {}", WIFI_NETWORK);
+
+    control.leave().await;
 
     defmt::info!("Enter main loop");
 
