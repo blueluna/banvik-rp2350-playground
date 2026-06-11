@@ -211,6 +211,13 @@ impl<const N: usize> Id3v2StreamParser<N> {
         &self.tags
     }
 
+    pub fn has_primary_text_fields(&self) -> bool {
+        self.tags.title.as_slice().is_some()
+            && self.tags.artist.as_slice().is_some()
+            && self.tags.album.as_slice().is_some()
+            && self.tags.year.as_slice().is_some()
+    }
+
     pub fn feed(&mut self, chunk: &[u8]) -> usize {
         if self.complete {
             return 0;

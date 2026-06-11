@@ -23,7 +23,7 @@ use embassy_rp::spi;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::PubSubChannel;
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_alloc::LlffHeap as Heap;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{
@@ -191,6 +191,7 @@ const UID_HEX_LEN: usize = 16;
 const MAX_SONG_PATH_LEN: usize = 96;
 const MAX_SONG_BINDINGS: usize = 64;
 const SONGS_JSON_BUFFER_SIZE: usize = 4096;
+const ID3_SCAN_LIMIT_BYTES: usize = 32 * 1024;
 
 #[derive(Clone)]
 struct SongBinding {
@@ -856,15 +857,18 @@ async fn stream_sd_song(
         }
 
         if let Some(header) = rp2350_playground::id3::parse_id3v2_header(&chunk_buffer[..first_len]) {
+            let id3_parse_started = Instant::now();
             let mut parser = rp2350_playground::id3::Id3v2StreamParser::<96>::new(header);
             let tag_total = header.total_size;
             let tag_body_start = 10usize;
             let tag_body_end = tag_body_start + header.tag_size;
             let mut trailing_audio: Option<(usize, usize)> = None;
+            let mut scanned_tag_bytes = 0usize;
 
             let first_body_end = first_len.min(tag_body_end);
             if first_body_end > tag_body_start {
-                parser.feed(&chunk_buffer[tag_body_start..first_body_end]);
+                let consumed = parser.feed(&chunk_buffer[tag_body_start..first_body_end]);
+                scanned_tag_bytes += consumed;
             }
 
             if first_len > tag_total {
@@ -872,20 +876,34 @@ async fn stream_sd_song(
             }
 
             while (file.offset() as usize) < tag_body_end {
+                if parser.is_complete() || parser.has_primary_text_fields() {
+                    break;
+                }
+                if scanned_tag_bytes >= ID3_SCAN_LIMIT_BYTES {
+                    break;
+                }
+
                 let remaining_tag = tag_body_end - file.offset() as usize;
                 let chunk_capacity = chunk_buffer.len();
-                let read_len = remaining_tag.min(chunk_capacity);
+                let remaining_scan_budget = ID3_SCAN_LIMIT_BYTES - scanned_tag_bytes;
+                let read_len = remaining_tag.min(chunk_capacity).min(remaining_scan_budget);
+                if read_len == 0 {
+                    break;
+                }
                 let len = file.read(&mut chunk_buffer[..read_len])?;
                 if len == 0 {
                     break;
                 }
-                parser.feed(&chunk_buffer[..len]);
+                let consumed = parser.feed(&chunk_buffer[..len]);
+                scanned_tag_bytes += consumed;
             }
 
             file.seek_from_start(tag_total as u32)?;
 
             let parsed_tags = parser.tags().as_tag_info();
             log_id3_tags(song.path.as_str(), &parsed_tags, song.size);
+            let id3_parse_elapsed = id3_parse_started.elapsed();
+            defmt::info!("ID3 tag read+parse took {} ms", id3_parse_elapsed.as_millis());
 
             if let Some((start, end)) = trailing_audio {
                 AUDIO_CHANNEL
@@ -1003,71 +1021,68 @@ async fn sd_card_stream_task(spi_device: SdSpiDevice) -> ! {
     }
 
     let mut songs_db = load_songs_db(&volume);
-    let mut playlist_index = 0usize;
+
     loop {
-        let song = &playlist[playlist_index];
+        let uid = NFC_UID_CHANNEL.receive().await;
+        let nfc_lookup_started = Instant::now();
+        let mut song_index = match handle_nfc_uid(&volume, &mut songs_db, &playlist, uid) {
+            Some(index) => index,
+            None => continue,
+        };
+        let nfc_lookup_elapsed = nfc_lookup_started.elapsed();
+        defmt::info!(
+            "NFC UID lookup+mapping took {} ms",
+            nfc_lookup_elapsed.as_millis()
+        );
+
         let mut resume_offset = 0u32;
         let mut resume_chunk_index = 0u32;
 
-        match stream_sd_song(&volume, song, resume_offset, resume_chunk_index).await {
-            Ok(StreamSongOutcome::Completed) => {
-                resume_offset = 0;
-                resume_chunk_index = 0;
-                playlist_index += 1;
-                if playlist_index >= playlist.len() {
-                    playlist_index = 0;
-                    defmt::info!("Reached end of playlist, restarting from top");
-                }
-            }
-            Ok(StreamSongOutcome::InterruptedByUid {
-                uid,
-                offset,
-                next_chunk_index,
-            }) => {
-                if let Some(song_index) = handle_nfc_uid(&volume, &mut songs_db, &playlist, uid) {
-                    playlist_index = song_index;
-                    resume_offset = 0;
-                    resume_chunk_index = 0;
-                } else {
-                    resume_offset = offset;
-                    resume_chunk_index = next_chunk_index;
-                }
-            }
-            Err(e) => {
-                defmt::warn!("Failed to stream {}: {}", song.path.as_str(), defmt::Debug2Format(&e));
-                Timer::after_millis(250).await;
-            }
-        }
-
-        while resume_offset != 0 {
-            match stream_sd_song(&volume, &playlist[playlist_index], resume_offset, resume_chunk_index).await {
+        loop {
+            match stream_sd_song(
+                &volume,
+                &playlist[song_index],
+                resume_offset,
+                resume_chunk_index,
+            )
+            .await
+            {
                 Ok(StreamSongOutcome::Completed) => {
-                    resume_offset = 0;
-                    resume_chunk_index = 0;
-                    playlist_index += 1;
-                    if playlist_index >= playlist.len() {
-                        playlist_index = 0;
-                        defmt::info!("Reached end of playlist, restarting from top");
-                    }
+                    // Stay idle after a song completes; the next song must be selected by NFC.
+                    defmt::info!("Song completed; waiting for NFC selection");
+                    break;
                 }
                 Ok(StreamSongOutcome::InterruptedByUid {
                     uid,
                     offset,
                     next_chunk_index,
                 }) => {
-                    if let Some(song_index) = handle_nfc_uid(&volume, &mut songs_db, &playlist, uid) {
-                        playlist_index = song_index;
+                    let nfc_lookup_started = Instant::now();
+                    if let Some(next_song_index) =
+                        handle_nfc_uid(&volume, &mut songs_db, &playlist, uid)
+                    {
+                        let nfc_lookup_elapsed = nfc_lookup_started.elapsed();
+                        defmt::info!(
+                            "NFC UID lookup+mapping took {} ms",
+                            nfc_lookup_elapsed.as_millis()
+                        );
+                        song_index = next_song_index;
                         resume_offset = 0;
                         resume_chunk_index = 0;
                     } else {
+                        let nfc_lookup_elapsed = nfc_lookup_started.elapsed();
+                        defmt::info!(
+                            "NFC UID lookup+mapping took {} ms",
+                            nfc_lookup_elapsed.as_millis()
+                        );
                         resume_offset = offset;
                         resume_chunk_index = next_chunk_index;
                     }
                 }
                 Err(e) => {
                     defmt::warn!(
-                        "Failed to resume {}: {}",
-                        playlist[playlist_index].path.as_str(),
+                        "Failed to stream {}: {}",
+                        playlist[song_index].path.as_str(),
                         defmt::Debug2Format(&e)
                     );
                     Timer::after_millis(250).await;
