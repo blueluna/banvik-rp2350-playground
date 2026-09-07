@@ -98,7 +98,7 @@ Investigate if the PWM LED drivers is inverse / negates the signal.
 
  - AO3400A
 
-!(PWM driver)[improvements/pwm-driver.png]
+![PWM driver](improvements/pwm-driver.png)
 
 ### Rotary encoder support 
 
