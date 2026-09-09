@@ -6,21 +6,49 @@
 
 2.54 mm screw terminals instead of 5 mm screw terminals
 
-LCSC# C918124
-LCSC# C5188446
-LCSC# C915915
+ - LCSC# C918124
+ - LCSC# C5188446
+ - LCSC# C915915
 
 ### Stereo audio
 
 An additional MAX98357A for the other channel
 
-LSCS# C910544 replace with C2682619?
+ - LSCS# C910544 replace with C2682619?
 
 379 kohm pull-up on SD_MODE for selecting right channel on one of the MAX98357A.
 
 ### Battery power
 
 Li-po battery port (JST-PH) and Li-Po charge circuit.
+
+```
+USB-C receptacle
+   │
+   ├─ CC1, CC2: 5.1 kΩ Rd to GND
+   ├─ ESD / TVS protection
+   └─ USB_5V ── input protection / eFuse ──┐
+                                            │
+                                     1S switching charger
+                                     + power-path manager
+                                            │
+                    Li-Po JST ───────── BAT│
+                                            │
+                                          VSYS
+                                            │
+              ┌─────────────────────────────┼───────────────────┐
+              │                             │                   │
+      3.3 V buck-boost                 5 V boost         optional 5 V
+              │                             │              load switch /
+            3V3                       5V_AUDIO             LC filtering
+              │                             │                   │
+           RP2350                 MAX98357A × 2              5V rail
+```
+
+ - BQ24074, 1S switching charger + power-path manager
+ - TPS63070, 5 V boost or Silergy SY7088?
+ - TPS63070 or TPS63070, 3V3
+ - Li‑Po protection, DW01A + dual MOSFET
 
 ### SD-Card
 
@@ -89,6 +117,9 @@ https://crates.io/crates/mipidsi
 ### 5V power improvement
 
 5V power improvement for better audio quality.
+
+![Audio 5V 1](improvements/audio-5v-1.png)
+![Audio 5V 2](improvements/audio-5v-1.png)
 
 ### Is the PWM Led drivers inverse
 
