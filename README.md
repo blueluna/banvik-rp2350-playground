@@ -53,7 +53,7 @@ TXB0102DCT, 3.3V to 5V level translator
 
 ### Qwiic / Stemma / I2C
 
-1 x port (J15)
+1 x port (J2)
 
 | Function | GPIO    |
 | -------- | ------- |
@@ -73,10 +73,10 @@ TXB0102DCT, 3.3V to 5V level translator
 | SHUTDOWN | GPIO 19 |
 
 Both amplifiers share the I2S bus and the SHUTDOWN line. Channel select is by
-resistor on SD_MODE: U9 is driven directly (left), U10 through 220 kOhm (right).
+resistor on SD_MODE: U11 is driven directly (left), U12 through 220 kOhm (right).
 Driving SHUTDOWN low shuts down both.
 
-Speaker terminal J18, 4-pos screw terminal:
+Speaker terminal J17, 4-pos screw terminal:
 
 | Pin | Signal    |
 | --- | --------- |
@@ -113,7 +113,7 @@ Raspberry Pi Radio Module 2 (RMC20452T). Same pins as Raspberry Pi Pico 2 W.
 
 ### GPIO header
 
-2x8 header (J14). GPIO 08-11 are no longer on the header; they drive the
+2x8 header (J6). GPIO 08-11 are no longer on the header; they drive the
 microSD socket.
 
 | Pin | Function | GPIO    |
@@ -139,7 +139,7 @@ microSD socket.
 
 Not necessarily for ADC input.
 
-ADC_AVDD is filtered from +3.3V by a 33 Ohm / 1 uF / 100 nF network (R54, C57, C58).
+ADC_AVDD is filtered from +3.3V by a 33 Ohm / 1 uF / 100 nF network (R6, C17, C18).
 
 | Function | GPIO    |
 | -------- | ------- |
@@ -152,28 +152,30 @@ ADC_AVDD is filtered from +3.3V by a 33 Ohm / 1 uF / 100 nF network (R54, C57, C
 
 ### Power
 
-USB-C (J1) is the only external supply input. It feeds a BQ24074 charger and
-power-path manager, which also charges a 1S Li-Po on the JST-PH connector (J13).
-The battery has DW01A + FS8205A protection.
+USB-C (J14) is the only external supply input. It feeds a BQ24074 charger and
+power-path manager (U7), which also charges a 1S Li-Po on the JST-PH connector
+(J16). The battery has DW01A + FS8205A protection (U8, Q5).
 
 The charger output, VSYS, feeds two TPS63070 buck-boost converters:
 
 | Rail  | Converter | Voltage | Feeds                                            |
 | ----- | --------- | ------- | ------------------------------------------------ |
-| +3.3V | U4        | 3.30 V  | RP2350, flash, PSRAM, RM2, microSD, headers      |
-| 3V3_AUDIO | (branch off +3.3V via R53) | 3.30 V | Both MAX98357A          |
-| +5V   | U5        | 5.09 V  | Smart LED connector, TXB0102 VCCB, header pin 3  |
+| +3.3V | U9        | 3.30 V  | RP2350, flash, PSRAM, RM2, microSD, headers      |
+| 3V3_AUDIO | (branch off +3.3V via R48) | 3.30 V | Both MAX98357A (U11, U12)   |
+| +5V   | U10       | 5.09 V  | Smart LED connector, TXB0102 VCCB, header pin 3  |
 
-Charger settings: input current limit ~1.4 A (R22 1.1 kOhm), fast charge 890 mA
-(R24 1 kOhm). VSYS is the system ceiling, not the 2 A rating of either converter.
+Charger settings: input current limit ~1.4 A (R37 1.1 kOhm), fast charge 890 mA
+(R39 1 kOhm). VSYS is the system ceiling, not the 2 A rating of either converter.
 
-J11 is a 4-pin 1.00 mm header carrying +3.3V and GND.
+J15 is a 4-pin 1.00 mm header carrying +3.3V and GND.
 
 ### System control
 
 | Function        | GPIO    | Notes                                          |
 | --------------- | ------- | ---------------------------------------------- |
-| 3V3_POWER_SAVE  | GPIO 14 | U4 PS/SYNC. High = power save (PFM), low = forced PWM. Pulled high by default; drive low while audio plays. |
+| 3V3_POWER_SAVE  | GPIO 14 | U9 PS/SYNC. High = power save (PFM), low = forced PWM. Pulled high by default; drive low while audio plays. |
+| 3V3_GOOD        | GPIO 15 | U9 power good, open drain, pulled to +3.3V.    |
+| 5V_GOOD         | GPIO 18 | U10 power good, open drain, pulled to +3.3V.   |
 
 ## Board bring up
 

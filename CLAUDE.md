@@ -11,7 +11,7 @@ Three unrelated build systems live side by side; there is no top-level build.
 | `pcb/` | KiCad 10 hardware design for the board | KiCad / `kicad-cli` |
 | `firmware/` | Embedded Rust for the RP2350 (Embassy async) | Cargo workspace |
 | `host/` | Desktop Rust — MP3 streaming server the firmware talks to | Cargo workspace |
-| `rp2350-music/` | Untracked KiCad spin-off of `pcb/`, not in git | — |
+| `rp2350-music/` | Untracked KiCad spin-off at the repo root, not in git — **not** the same thing as the `rp2350-music` project inside `pcb/` | — |
 
 `README.md` at the repo root holds the **authoritative GPIO pinout and bring-up status**. The
 pinout table in `firmware/CLAUDE.md` is a subset derived from the examples; when they disagree,
@@ -83,8 +83,18 @@ of the wire contract — changing one breaks the other side silently.
 
 ## PCB (`pcb/`)
 
-The KiCad project is named **`rp-lights`**, not after the repo or the board. Root sheet is
-`pcb/rp-lights.kicad_sch`; `power`, `audio` and `storage` are separate `.kicad_sch` files.
+The KiCad project is **`rp2350-music`** (renamed from `rp-lights`), so the root sheet is
+`pcb/rp2350-music.kicad_sch`. It instantiates four sub-sheets:
+
+| Sheetname | File | Contents |
+|---|---|---|
+| RP2350 | `rp-lights.kicad_sch` | MCU, flash, PSRAM, RM2 radio, buttons, LED drivers, headers |
+| Power | `power.kicad_sch` | USB-C, BQ24074 charger, battery protection, two TPS63070 rails |
+| Audio | `audio.kicad_sch` | Two MAX98357A amps, output filter, speaker terminal |
+| Storage | `storage.kicad_sch` | microSD socket |
+
+`rp-lights.kicad_sch` keeps its old filename but is now the MCU **sub-sheet**, not the root — do
+not treat it as the top level.
 
 **All KiCad files are Git LFS pointers** (see the root `.gitattributes`: `.kicad_sch`, `.kicad_pcb`,
 `.kicad_sym`, `.kicad_mod`, `.kicad_pro`, plus `.pdf`/`.png`/`.zip`/`.bin`/`.mp3`/`.mod`). They are
@@ -95,7 +105,7 @@ symbols and hierarchy for you:
 
 ```bash
 cd pcb
-kicad-cli sch export netlist --format kicadxml -o /tmp/net.xml rp-lights.kicad_sch
+kicad-cli sch export netlist --format kicadxml -o /tmp/net.xml rp2350-music.kicad_sch
 kicad-cli sch export netlist --format kicadxml -o /tmp/audio.xml audio.kicad_sch   # sheets export standalone too
 ```
 
@@ -103,16 +113,34 @@ Note this is read-only but does write the output file; keep exports out of the p
 (`*.xml`, `*.csv`, `*.net` are gitignored anyway).
 
 **Symbol/footprint libraries** come from two places: project-local ones registered in
-`pcb/sym-lib-table` / `pcb/fp-lib-table` (`MCU_RaspberryPi_RP2350`, `RPI_RMC20452T`,
-`lcsc_imported`, `lcsc_footprints` under `pcb/libs/lcsc/`), and `PCM_JLCPCB-*` libraries that resolve
-only through the user's **global** KiCad tables (`~/.config/kicad/10.0/`). A checkout alone will not
-open cleanly without that plugin installed.
+`pcb/sym-lib-table` / `pcb/fp-lib-table`, and `PCM_JLCPCB-*` libraries that resolve only through the
+user's **global** KiCad tables (`~/.config/kicad/10.0/`). A checkout alone will not open cleanly
+without that plugin installed.
 
-**Rev B is mid-refactor.** `power`, `audio` and `storage` are not yet instantiated as sheet symbols
-in `rp-lights.kicad_sch`, so a netlist export of the root sheet sees only the MCU. Design notes:
-`pcb/improvements.md` (backlog) and `pcb/audio_3v3.md` (analysis of moving the MAX98357A amps to
-3.3 V, including the current power budget and known schematic bugs). The `_restore_backup_*/` and
-`.history/` directories are editor artefacts, not design history — ignore them.
+Known gap: the schematics reference `lcsc_footprints:` and `lcsc_imported:`, and the files exist
+under `pcb/libs/lcsc/`, but **neither nickname is registered in the project tables**. That leaves
+eight broken footprint links (RN1, RN2, Card1, U9, U10, L2, L3, Q5) and will block the PCB update
+until the two `(lib ...)` entries are added back.
+
+**Rev B was re-annotated after the hierarchy was linked, so every reference designator changed.**
+Anything citing pre-rev-B refs — git history, older notes, `pcb/jlcpcb/project.db` — is keyed to the
+old numbering and will mislead. Current numbering is sequential per sheet: RP2350 C1-C27, Power
+C28-C50, Audio C51-C58. A few anchors:
+
+| Part | Ref |
+|---|---|
+| RP2350 / level shifter / flash / PSRAM / RM2 | U1 / U2 / U3 / U4 / U5 |
+| USBLC6 / BQ24074 / DW01A | U6 / U7 / U8 |
+| TPS63070 +3.3V / +5V | U9 / U10 |
+| MAX98357A left / right | U11 / U12 |
+| `3V3_AUDIO` 0 ohm link | R48 |
+| SD_MODE channel-select | R54 (220k) |
+| USB-C / battery JST / speaker terminal | J14 / J16 / J17 |
+
+Design notes: `pcb/improvements.md` (backlog) and `pcb/audio_3v3.md` (moving the MAX98357A amps to
+3.3 V, with the power budget) — **`audio_3v3.md` still uses the pre-annotation refs.** The
+`_restore_backup_*/` and `.history/` directories are editor artefacts, not design history — ignore
+them.
 
 ## Codex config detected
 
