@@ -84,17 +84,62 @@ of the wire contract — changing one breaks the other side silently.
 ## PCB (`pcb/`)
 
 The KiCad project is **`rp2350-music`** (renamed from `rp-lights`), so the root sheet is
-`pcb/rp2350-music.kicad_sch`. It instantiates four sub-sheets:
+`pcb/rp2350-music.kicad_sch`. It instantiates six sub-sheets:
 
 | Sheetname | File | Contents |
 |---|---|---|
-| RP2350 | `rp-lights.kicad_sch` | MCU, flash, PSRAM, RM2 radio, buttons, LED drivers, headers |
-| Power | `power.kicad_sch` | USB-C, BQ24074 charger, battery protection, two TPS63070 rails |
-| Audio | `audio.kicad_sch` | Two MAX98357A amps, output filter, speaker terminal |
-| Storage | `storage.kicad_sch` | microSD socket |
+| RP2350 | `sheets/rp2350.kicad_sch` | MCU, RM2 radio, crystal, debug header |
+| Power | `sheets/power.kicad_sch` | USB-C, BQ24074 charger, battery protection, two TPS63070 rails |
+| Audio | `sheets/audio.kicad_sch` | Two MAX98357A amps, output filter, speaker terminal |
+| Storage | `sheets/storage.kicad_sch` | microSD socket, QSPI flash (U3) and PSRAM (U4) |
+| Video & NFC | `sheets/video_nfc.kicad_sch` | RFID-RC522 header (J18), display header (J19) |
+| Buttons & Light | `sheets/control-and-lights.kicad_sch` | Button connectors (J20-J23), LED PWM drivers, smart-LED level translator, two rotary encoders |
 
-`rp-lights.kicad_sch` keeps its old filename but is now the MCU **sub-sheet**, not the root — do
-not treat it as the top level.
+Flash and PSRAM live on the **Storage** sheet, not the MCU sheet, which is why the QSPI bus
+`{SCK,IO0,IO1,IO2,IO3,~{CS0},~{CS1}}` crosses from RP2350 to Storage.
+
+All six sub-sheets live in `pcb/sheets/`; only the root sheet sits at `pcb/`. The MCU sheet was
+`rp-lights.kicad_sch` before the hierarchy work — anything referring to that filename is stale.
+
+**Inter-sheet signals travel as bus groups on the sheet pins.** The current set is:
+
+```
+{SCK,IO0,IO1,IO2,IO3,~{CS0},~{CS1}}                                  RP2350 <-> Storage (QSPI)
+{~{TF_CS},SPI1_SCK,SPI1_RX,SPI1_TX,TF_CD}                            RP2350 <-> Storage (microSD)
+{SPI1_SCK,SPI1_TX,SPI1_RX,~{NFC_CS},NFC_IRQ,NFC_RESET}               RP2350 <-> Video & NFC
+{SPI0_SCK,SPI0_TX,SPI0_RX,~{DISPLAY_CS},DISPLAY_DC,DISPLAY_RST,DISPLAY_BL}   RP2350 <-> Video & NFC
+{I2S_BCK,I2S_FSYNC,I2S_DIN,~{AUDIO_SHUTDOWN}}                        RP2350 <-> Audio
+{3V3_GOOD,3V3_POWER_SAVE,5V_GOOD,5V_POWER_SAVE}                      RP2350 <-> Power
+{BTN1,BTN2,BTN3,BTN4} / {BTN1_PWM,BTN2_PWM,BTN3_PWM,BTN4_PWM}        RP2350 <-> Buttons & Light
+{ENC_1_A,ENC_1_B,ENC_1_SW,ENC_2_A,ENC_2_B,ENC_2_SW}                  RP2350 <-> Buttons & Light
+{SMART_LED_CK,SMART_LED_DA}                                          RP2350 <-> Buttons & Light
+```
+
+Adding a cross-sheet signal means editing the sheet pin on the root **and** the matching
+hierarchical label inside the subsheet — the two strings must agree. Rails cross as power symbols
+instead (`+3.3V`, `+5V`, `3V3_AUDIO`, `VBUS`, `GND`), not through sheet pins.
+
+Bus **members** also merge with identically-named plain labels elsewhere on the same sheet, which is
+how the NFC bus reaches J18: the RC522 shares the microSD SPI1 lines and only adds `~{NFC_CS}`,
+`NFC_IRQ` and `NFC_RESET` on GPIO 26/27/28. Only one of `~{NFC_CS}` and `~{TF_CS}` may be asserted
+at a time.
+
+**A name mismatch between a bus member and a wire label is a warning, not an error.** If the bus
+says `~{TF_CS}` and the wire on it is labelled `TF_CS`, KiCad reports `net_not_bus_member` and ERC
+still shows zero errors — but the signal never crosses the sheet boundary. A comma typo inside a
+group (`{BTN1,BTN2.BTN3,BTN4}`) is worse: it is *consistent*, so it produces no error at all while
+silently merging two signals into one dead net. Both have bitten this design. After any bus edit,
+check the exported netlist, not the ERC error count:
+
+```bash
+python3 -c "
+import xml.etree.ElementTree as ET
+r=ET.parse('/tmp/net.xml').getroot()
+print([n.get('name') for n in r.find('nets').findall('net')
+       if len(n.findall('node'))==1 and not n.get('name').startswith('unconnected-')])"
+```
+
+Expect only `SPI0_RX`, `UART_TX` and `UART_RX` — the three deliberately unrouted pins.
 
 **All KiCad files are Git LFS pointers** (see the root `.gitattributes`: `.kicad_sch`, `.kicad_pcb`,
 `.kicad_sym`, `.kicad_mod`, `.kicad_pro`, plus `.pdf`/`.png`/`.zip`/`.bin`/`.mp3`/`.mod`). They are
@@ -106,7 +151,7 @@ symbols and hierarchy for you:
 ```bash
 cd pcb
 kicad-cli sch export netlist --format kicadxml -o /tmp/net.xml rp2350-music.kicad_sch
-kicad-cli sch export netlist --format kicadxml -o /tmp/audio.xml audio.kicad_sch   # sheets export standalone too
+kicad-cli sch export netlist --format kicadxml -o /tmp/audio.xml sheets/audio.kicad_sch   # sheets export standalone too
 ```
 
 Note this is read-only but does write the output file; keep exports out of the project directory
@@ -123,7 +168,7 @@ eight broken footprint links (RN1, RN2, Card1, U9, U10, L2, L3, Q5) and will blo
 until the two `(lib ...)` entries are added back.
 
 **Rev B was re-annotated after the hierarchy was linked, so every reference designator changed.**
-Anything citing pre-rev-B refs — git history, older notes, `pcb/jlcpcb/project.db` — is keyed to the
+Anything citing pre-rev-B refs — git history and older notes — is keyed to the
 old numbering and will mislead. Current numbering is sequential per sheet: RP2350 C1-C27, Power
 C28-C50, Audio C51-C58. A few anchors:
 
@@ -132,13 +177,20 @@ C28-C50, Audio C51-C58. A few anchors:
 | RP2350 / level shifter / flash / PSRAM / RM2 | U1 / U2 / U3 / U4 / U5 |
 | USBLC6 / BQ24074 / DW01A | U6 / U7 / U8 |
 | TPS63070 +3.3V / +5V | U9 / U10 |
-| MAX98357A left / right | U11 / U12 |
+| MAX98357A right / left | U11 / U12 |
 | `3V3_AUDIO` 0 ohm link | R48 |
 | SD_MODE channel-select | R54 (220k) |
 | USB-C / battery JST / speaker terminal | J14 / J16 / J17 |
 
-Design notes: `pcb/improvements.md` (backlog) and `pcb/audio_3v3.md` (moving the MAX98357A amps to
-3.3 V, with the power budget) — **`audio_3v3.md` still uses the pre-annotation refs.** The
+Channel select: U12's `SD_MODE` sits directly on `~{AUDIO_SHUTDOWN}` (3.3 V, Left band), while U11
+reaches it through R54 220k, dividing against the amp's internal 100k pulldown to ≈1.03 V (Right
+band). So **U11 is Right and U12 is Left**, matching the text on the Audio sheet.
+
+The MAX98357A amps have **already been moved off +5V**: both run from `3V3_AUDIO`, branched off
+`+3.3V` through R48. That leaves the +5V rail (U10) feeding only the smart-LED terminal J8, the
+TXB0102 VCCB and J6 pin 3.
+
+Design notes: `pcb/improvements.md` (backlog), with its images under `pcb/improvements/`. The
 `_restore_backup_*/` and `.history/` directories are editor artefacts, not design history — ignore
 them.
 

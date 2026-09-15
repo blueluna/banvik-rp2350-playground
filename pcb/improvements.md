@@ -18,6 +18,40 @@ An additional MAX98357A for the other channel
 
 379 kohm pull-up on SD_MODE for selecting right channel on one of the MAX98357A.
 
+### I2S microphone
+
+TDK INMP441. **Analysed, not implemented.** Feasible, but it spends the last practically-free GPIO.
+
+The mic needs only **one** new pin. The RP2350 is already I2S controller for the amplifiers, so the
+INMP441 can share `I2S_BCK` (GPIO 21) and `I2S_FSYNC` (GPIO 22); its SD line is an input to the MCU,
+so nothing contends with `I2S_DIN` (GPIO 20, MCU to amps). Only SD needs a pin of its own.
+
+**GPIO 4 (`SPI0_RX`) is the donor.** All 48 GPIO are allocated; the only pins not routed anywhere
+are GPIO 4 and the GPIO 40/41 UART pair. GPIO 4 is free in practice because the display is
+write-only and J19 has no MISO pin. It is also the only one that *works*: RP2350B's PIO sees a
+32-pin window at a time (GPIOBASE 0 gives GPIO 0-31, 16 gives GPIO 16-47), and GPIO 4 sits in a
+different window from GPIO 40/41, so those three could never serve one state machine. GPIO 4, 20,
+21 and 22 all fall inside window 0-31, so one PIO instance covers the whole audio path.
+
+Three consequences to accept before building it:
+
+- **32-bit slots.** The INMP441 requires exactly 64 SCK per WS frame (32 per channel). The firmware
+  runs `BIT_DEPTH = 16`; it must move to 32. The MAX98357A accepts 64xfs, so this is safe.
+- **44.1 kHz becomes a ceiling.** 64 x 44100 = 2.8224 MHz, inside the mic's 0-3 MHz SCK range.
+  48 kHz would need 3.072 MHz and exceeds spec. The host already transcodes to mono 44.1 kHz.
+- **A custom PIO program is needed.** embassy-rp does ship `PioI2sIn` for `rp235xb`, but it is
+  documented as "both the controller (provider of SCK and WS) and receiver" - it drives the clock
+  pins itself and would fight `PioI2sOut`. An input-only program treating BCK/WS as inputs, or a
+  single duplex program, is required. PIO capacity is not a constraint: PIO0 SM0 is I2S out and
+  PIO1 SM1 is WS2812, across three blocks of four state machines.
+
+Supply and mounting: the part runs on 1.8-3.3 V. Prefer a filtered branch off `+3.3V` over
+`3V3_AUDIO`, which feeds the class-D amps through R48 and carries their switching noise. A 1x06
+2.54 mm header for the usual breakout (matching J18 and J19) keeps a MEMS mic off the board shared
+with two amplifiers and lets the port sit against an enclosure opening. Strap L/R to GND to put the
+mic in the left slot, and enable the pin's internal pulldown - a lone INMP441 tri-states SD outside
+its half-frame.
+
 ### Battery power
 
 Li-po battery port (JST-PH) and Li-Po charge circuit.
@@ -102,6 +136,9 @@ Support for FCP 24 connector and components for eInk displays.
 
 ### TFT display support
 
+**Done in rev B** - J19, an 8-pin header on SPI0. See the Display section in the root `README.md`
+for the pinout.
+
 Support for display that support MIPI Display Command Set,
 https://crates.io/crates/mipidsi
 
@@ -132,5 +169,7 @@ Investigate if the PWM LED drivers is inverse / negates the signal.
 ![PWM driver](improvements/pwm-driver.png)
 
 ### Rotary encoder support 
+
+**Done in rev B** - SW3 and SW4 on GPIO 42-47, each channel RC-filtered.
 
 Footprint and filter for rotary encoder.
